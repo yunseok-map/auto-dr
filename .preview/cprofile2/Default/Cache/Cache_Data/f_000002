@@ -1,0 +1,926 @@
+'use strict';
+
+let runs = [];
+let selectedId = null;
+let selectedIter = null;
+let activeTab = 'review';
+let notifyEnabled = false;
+const seenAlerts = new Set(); // runId:ts → 알림 1회만 발생
+
+const $ = (sel) => document.querySelector(sel);
+
+// ---------- inline SVG icon set (single stroke family, no emoji) ----------
+const _S = (p, extra = '') =>
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ${extra}>${p}</svg>`;
+const ICONS = {
+  star: _S('<path d="M12 3.5l2.6 5.4 5.9.8-4.3 4.1 1 5.9L12 17l-5.2 2.7 1-5.9L3.5 9.7l5.9-.8z"/>'),
+  repeat: _S('<path d="M17 2l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>'),
+  award: _S('<circle cx="12" cy="8" r="5"/><path d="M8.2 12.5L7 22l5-3 5 3-1.2-9.5"/>'),
+  coin: _S('<ellipse cx="12" cy="6" rx="8" ry="3.2"/><path d="M4 6v6c0 1.8 3.6 3.2 8 3.2s8-1.4 8-3.2V6"/><path d="M4 12v6c0 1.8 3.6 3.2 8 3.2s8-1.4 8-3.2v-6"/>'),
+  cpu: _S('<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/>'),
+  trend: _S('<path d="M3 17l6-6 4 4 7-7"/><path d="M17 7h4v4"/>'),
+  bars: _S('<path d="M4 20V10M10 20V4M16 20v-8M22 20H2"/>'),
+  target: _S('<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3.4"/>'),
+  ledger: _S('<rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h4"/>'),
+  history: _S('<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 8v4l3 2"/>'),
+  doc: _S('<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>'),
+  terminal: _S('<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/>'),
+  pause: _S('<path d="M9 5v14M15 5v14"/>'),
+  play: _S('<path d="M6 4.5v15l13-7.5z" fill="currentColor" stroke="none"/>'),
+  stop: _S('<rect x="6" y="6" width="12" height="12" rx="1.5" fill="currentColor" stroke="none"/>'),
+  spinner: _S('<path d="M12 3a9 9 0 1 0 9 9"/>'),
+  check: _S('<path d="M20 6L9 17l-5-5"/>'),
+  warn: _S('<path d="M12 3l9 16H3z"/><path d="M12 10v4M12 17.5v.4"/>'),
+  x: _S('<path d="M6 6l12 12M18 6L6 18"/>'),
+  info: _S('<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8v.4"/>'),
+  alert: _S('<circle cx="12" cy="12" r="9"/><path d="M9 9l6 6M15 9l-6 6"/>'),
+  download: _S('<path d="M12 4v11M8 11l4 4 4-4"/><path d="M5 20h14"/>'),
+  file: _S('<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>'),
+  lock: _S('<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>'),
+  signal: _S('<path d="M4 18a14 14 0 0 1 16 0M7 15a9 9 0 0 1 10 0M10 12a4.5 4.5 0 0 1 4 0"/><circle cx="12" cy="20" r="1.4" fill="currentColor" stroke="none"/>'),
+};
+function icon(name, cls) { return `<span class="ic ${cls || ''}" aria-hidden="true">${ICONS[name] || ''}</span>`; }
+function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
+let _chartRun = null, _chartRO = null, _lastTraceRunId = null, _chartAnim = null;
+
+// ---------- responsive shell: drawer / scrim / scroll-condense ----------
+function initShell() {
+  const sidebar = $('#sidebar');
+  const scrim = $('#scrim');
+  const toggle = $('#nav-toggle');
+  if (!sidebar || !scrim || !toggle) return;
+  scrim.removeAttribute('hidden');
+  const isMobile = () => window.matchMedia('(max-width: 1024px)').matches;
+
+  function open() {
+    sidebar.classList.add('open');
+    scrim.classList.add('show');
+    document.body.classList.add('nav-open');
+    toggle.setAttribute('aria-expanded', 'true');
+    const f = sidebar.querySelector('button, [href], input:not([type=hidden]), select, textarea');
+    if (f) f.focus();
+  }
+  function close() {
+    sidebar.classList.remove('open');
+    scrim.classList.remove('show');
+    document.body.classList.remove('nav-open');
+    toggle.setAttribute('aria-expanded', 'false');
+  }
+  window.__closeDrawerIfMobile = () => { if (isMobile()) close(); };
+
+  toggle.onclick = () => (sidebar.classList.contains('open') ? close() : open());
+  scrim.onclick = close;
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && sidebar.classList.contains('open')) { close(); toggle.focus(); }
+  });
+  // focus trap inside drawer (mobile only)
+  sidebar.addEventListener('keydown', (e) => {
+    if (e.key !== 'Tab' || !isMobile() || !sidebar.classList.contains('open')) return;
+    const f = sidebar.querySelectorAll('button, [href], input:not([type=hidden]), select, textarea, [tabindex]:not([tabindex="-1"])');
+    if (!f.length) return;
+    const first = f[0], last = f[f.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  });
+
+  // header condense on scroll (detail pane scrolls internally)
+  const header = document.querySelector('header');
+  const detail = $('#detail');
+  if (header && detail) detail.addEventListener('scroll', () => header.classList.toggle('scrolled', detail.scrollTop > 8), { passive: true });
+  window.addEventListener('resize', debounce(() => { if (!isMobile()) close(); }, 150));
+}
+
+// ---------- 새 리뷰 폼 ----------
+const FOCUS_PRESETS = [
+  { label: '종합 (균형 평가)', value: '' },
+  { label: '보안·취약점 중심', value: '보안 취약점, 입력 검증, 인증/인가, 민감정보 노출을 최우선으로 점검하고 개선하라.' },
+  { label: '가독성·유지보수 중심', value: '가독성, 네이밍, 구조, 중복 제거, 유지보수성을 최우선으로 개선하라.' },
+  { label: '성능 최적화 중심', value: '성능 병목, 불필요한 연산/할당, 비효율 알고리즘을 최우선으로 찾아 개선하라.' },
+  { label: '문서 명료성·구조 중심', value: '문장 명료성, 논리 구조, 일관성, 완결성을 최우선으로 개선하라.' },
+  { label: 'SEO·전환·마케팅 중심', value: 'SEO, 카피 설득력, 전환 유도, 접근성을 최우선으로 개선하라.' },
+];
+
+let reviewMethod = 'file';
+let selectedFile = null;
+
+function initForm() {
+  const fs = $('#focus-select');
+  fs.innerHTML = FOCUS_PRESETS.map((p, i) => `<option value="${i}">${p.label}</option>`).join('');
+
+  document.querySelectorAll('.seg-btn').forEach((b) => {
+    b.onclick = () => {
+      reviewMethod = b.dataset.method;
+      document.querySelectorAll('.seg-btn').forEach((x) => x.classList.toggle('active', x === b));
+      $('#drop').classList.toggle('hidden', reviewMethod !== 'file');
+      $('#url-input').classList.toggle('hidden', reviewMethod !== 'url');
+    };
+  });
+
+  const drop = $('#drop');
+  const fileInput = $('#file-input');
+  drop.onclick = () => fileInput.click();
+  drop.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); }
+  });
+  fileInput.onchange = () => setFile(fileInput.files[0]);
+  ['dragover', 'dragenter'].forEach((ev) =>
+    drop.addEventListener(ev, (e) => {
+      e.preventDefault();
+      drop.classList.add('over');
+    }),
+  );
+  ['dragleave', 'drop'].forEach((ev) =>
+    drop.addEventListener(ev, (e) => {
+      e.preventDefault();
+      drop.classList.remove('over');
+    }),
+  );
+  drop.addEventListener('drop', (e) => {
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) setFile(e.dataTransfer.files[0]);
+  });
+
+  $('#start-btn').onclick = submitReview;
+  $('#notify-btn').onclick = enableNotifications;
+}
+
+function setFile(f) {
+  selectedFile = f || null;
+  $('#file-name').innerHTML = f ? icon('file') + ' ' + escapeHtml(f.name) : '';
+}
+
+async function submitReview() {
+  const btn = $('#start-btn');
+  const msg = $('#nr-msg');
+  msg.className = 'nr-msg';
+  msg.textContent = '';
+
+  const fd = new FormData();
+  if (reviewMethod === 'file') {
+    if (!selectedFile) return setMsg('err', '파일을 선택하세요.');
+    fd.append('file', selectedFile);
+  } else {
+    const src = $('#url-input').value.trim();
+    if (!src) return setMsg('err', 'URL 또는 경로를 입력하세요.');
+    fd.append('source', src);
+  }
+  fd.append('focus', FOCUS_PRESETS[parseInt($('#focus-select').value, 10)].value);
+  fd.append('kind', $('#kind-select').value);
+  if ($('#maxiter-input').value) fd.append('maxIter', $('#maxiter-input').value);
+  if ($('#recur-input').value) fd.append('recurWindow', $('#recur-input').value);
+  if ($('#maxcost-input').value) fd.append('maxCostPerIterUsd', $('#maxcost-input').value);
+  if ($('#maxtotalcost-input').value) fd.append('maxTotalCostUsd', $('#maxtotalcost-input').value);
+  if ($('#maxattempts-input').value) fd.append('maxAttemptsPerModel', $('#maxattempts-input').value);
+  if ($('#model-select').value) fd.append('model', $('#model-select').value);
+
+  btn.disabled = true;
+  setMsg('ok', '시작 중…');
+  try {
+    const r = await fetch('/api/runs', { method: 'POST', body: fd });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || '시작 실패');
+    setMsg('ok', `✓ 리뷰 시작됨: ${data.title} (${data.kind})`);
+    toast('ok', '리뷰 시작', `${data.title} 분석을 시작했습니다.`);
+    setFile(null);
+    $('#file-input').value = '';
+    $('#url-input').value = '';
+    setTimeout(loadRuns, 600);
+  } catch (e) {
+    setMsg('err', '✖ ' + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+  function setMsg(cls, t) {
+    msg.className = 'nr-msg ' + cls;
+    msg.textContent = t;
+  }
+}
+
+// ---------- 런 제어 (일시정지 / 재개 / 중단) ----------
+async function controlRun(id, action) {
+  try {
+    const r = await fetch(`/api/runs/${id}/${action}`, { method: 'POST' });
+    if (!r.ok) throw new Error((await r.json()).error || '실패');
+    const label = { pause: '일시정지', resume: '재개', stop: '중단' }[action];
+    if (action === 'pause') toast('warn', '일시정지 요청됨', '진행 중인 반복이 끝나면 멈춥니다. (이후 토큰 미사용)');
+    else if (action === 'resume') toast('ok', '재개됨', '다음 반복부터 다시 진행합니다.');
+    else toast('info', '중단 요청됨', '진행 중인 반복이 끝나면 종료됩니다.');
+    setTimeout(loadRuns, 400);
+  } catch (e) {
+    toast('err', '제어 실패', e.message);
+  }
+}
+
+// ---------- 알림 ----------
+async function enableNotifications() {
+  if (!('Notification' in window)) return toast('err', '알림 미지원', '이 브라우저는 데스크톱 알림을 지원하지 않습니다.');
+  const perm = await Notification.requestPermission();
+  notifyEnabled = perm === 'granted';
+  $('#notify-btn').classList.toggle('on', notifyEnabled);
+  const lbl = $('#notify-btn .notify-label');
+  if (lbl) lbl.textContent = notifyEnabled ? '알림 켜짐' : '알림 켜기';
+  $('#notify-btn').title = notifyEnabled ? '자동 일시정지 시 데스크톱 알림을 받습니다' : '자동 일시정지 시 데스크톱 알림 받기';
+  toast(notifyEnabled ? 'ok' : 'warn', notifyEnabled ? '알림 켜짐' : '알림 거부됨',
+    notifyEnabled ? '자동 일시정지 시 데스크톱 알림을 받습니다.' : '브라우저 설정에서 허용해야 합니다.');
+}
+
+function desktopNotify(title, body) {
+  if (notifyEnabled && 'Notification' in window && Notification.permission === 'granted') {
+    try { new Notification(title, { body, icon: '' }); } catch {}
+  }
+}
+
+function beep() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+    o.connect(g); g.connect(ctx.destination);
+    o.type = 'sine'; o.frequency.value = 880;
+    g.gain.setValueAtTime(0.0001, ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.18, ctx.currentTime + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.4);
+    o.start(); o.stop(ctx.currentTime + 0.42);
+  } catch {}
+}
+
+// 새로 발생한 자동 일시정지 알림 감지 → 토스트/데스크톱/비프
+function checkAlerts() {
+  for (const r of runs) {
+    if (r.alert && r.status === 'paused') {
+      const key = r.id + ':' + r.alert.ts;
+      if (!seenAlerts.has(key)) {
+        seenAlerts.add(key);
+        toast('warn', r.alert.title, r.alert.message + `\n(런: ${r.title})`, 12000);
+        desktopNotify('auto-dr · ' + r.alert.title, r.alert.message);
+        beep();
+      }
+    }
+  }
+}
+
+// ---------- 토스트 ----------
+function toast(type, title, msg, ms = 6000) {
+  const ico = icon({ ok: 'check', warn: 'warn', err: 'x', info: 'info' }[type] || 'info');
+  const el = document.createElement('div');
+  el.className = 'toast ' + type;
+  el.innerHTML = `<div class="t-ico">${ico}</div>
+    <div class="t-body"><div class="t-title">${escapeHtml(title)}</div><div class="t-msg">${escapeHtml(msg)}</div></div>
+    <div class="t-close">×</div>`;
+  const close = () => { el.classList.add('out'); setTimeout(() => el.remove(), 250); };
+  el.querySelector('.t-close').onclick = close;
+  $('#toasts').appendChild(el);
+  setTimeout(close, ms);
+}
+
+// ---------- 데이터 ----------
+async function fetchJson(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+async function fetchText(url) {
+  const r = await fetch(url);
+  if (!r.ok) return '';
+  return r.text();
+}
+
+async function loadRuns() {
+  try {
+    runs = await fetchJson('/api/runs');
+  } catch {
+    runs = [];
+  }
+  checkAlerts();
+  // 선택된 대상이 없으면 URL 해시(#run=id) 또는 가장 최근 런을 자동 선택 — 열자마자 콘솔이 보이도록
+  if (!selectedId && runs.length) {
+    const fromHash = decodeURIComponent((location.hash.match(/run=([^&]+)/) || [])[1] || '');
+    selectedId = fromHash && runs.some((r) => r.id === fromHash) ? fromHash : runs[0].id;
+  }
+  renderSidebar();
+  if (selectedId) await renderDetail(selectedId);
+}
+
+const STATUS_LABEL = {
+  pending: '대기',
+  running: '진행중',
+  paused: '일시정지',
+  stopped_user: '사용자 중단',
+  stopped_done: '완료(개선 종료)',
+  stopped_plateau: '정체로 중단',
+  stopped_declined: '하락으로 중단',
+  stopped_cap: '반복 상한 도달',
+  stopped_cost: '비용 상한 도달',
+  completed: '완료',
+  error: '오류',
+};
+function statusLabel(s) { return STATUS_LABEL[s] || s; }
+function statusTag(s, big) {
+  const spin = s === 'running' ? `<span class="spin">${icon('spinner')}</span> ` : s === 'paused' ? icon('pause') + ' ' : '';
+  return `<span class="status-tag status-${s}${big ? ' big' : ''}">${spin}${statusLabel(s)}</span>`;
+}
+// 모델 id 를 보기 좋게 (claude-opus-4-8-... → Opus 4.8)
+function prettyModel(m) {
+  if (!m) return null;
+  return m
+    .split(',')
+    .map((one) => {
+      const s = one.trim().replace(/^claude-/, '');
+      const fam = (s.match(/(opus|sonnet|haiku|fable)/i) || [])[1];
+      const ver = (s.match(/(\d+)-(\d+)/) || []);
+      const label = fam ? fam[0].toUpperCase() + fam.slice(1).toLowerCase() : s;
+      return ver[1] ? `${label} ${ver[1]}.${ver[2]}` : label;
+    })
+    .join(', ');
+}
+function reqModelLabel(run) {
+  const m = run.config && run.config.model;
+  if (!m || m === 'auto') return '자동 (라우팅)';
+  return m;
+}
+function scoreColor(v) {
+  if (v == null) return 'var(--faint)';
+  if (v >= 85) return 'var(--ok)';
+  if (v >= 65) return 'var(--signal)';
+  if (v >= 45) return 'var(--warn)';
+  return 'var(--bad)';
+}
+// 사이드바 타깃 카드용 미니 신호 스파크라인(최근 점수 추이)
+function sparkline(scores) {
+  const pts = (scores || []).map((s) => s.score).slice(-12);
+  const W = 56, H = 18, pad = 2;
+  if (!pts.length) return `<svg class="tgt-spark" viewBox="0 0 ${W} ${H}" aria-hidden="true"></svg>`;
+  const n = pts.length;
+  const x = (i) => (n === 1 ? W / 2 : pad + (i / (n - 1)) * (W - 2 * pad));
+  const y = (v) => pad + (1 - v / 100) * (H - 2 * pad);
+  const d = pts.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(' ');
+  const lx = x(n - 1).toFixed(1), ly = y(pts[n - 1]).toFixed(1);
+  return `<svg class="tgt-spark" viewBox="0 0 ${W} ${H}" aria-hidden="true">
+    <path d="${d}" fill="none" stroke="var(--signal)" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
+    <circle cx="${lx}" cy="${ly}" r="1.9" fill="var(--lock)"/>
+  </svg>`;
+}
+// 베스트가 "잠긴"(수렴/완료) 상태인지
+function isLocked(run) {
+  return run.bestScore != null && (run.status === 'completed' || run.status === 'stopped_done');
+}
+// 포착 패널 하단 텔레메트리 스트립
+function telemetryStrip(run) {
+  const cap = run.config && run.config.maxIterations;
+  const pass = `${run.currentIteration}${cap ? ` / ${cap}` : ''}`;
+  const model = prettyModel(run.actualModel) || reqModelLabel(run);
+  const cost = run.totalCostUsd ? `$${run.totalCostUsd.toFixed(4)}` : '$0';
+  const costCap = run.config && run.config.maxTotalCostUsd ? ` / cap $${run.config.maxTotalCostUsd}` : '';
+  const its = run.iterations || [];
+  const avg = its.length ? (its.reduce((s, i) => s + (i.durationMs || 0), 0) / its.length / 1000).toFixed(1) + 's' : '—';
+  const item = (l, v, cls = '') => `<span class="tele-item"><span class="tl">${l}</span><span class="tv ${cls}">${v}</span></span>`;
+  return (
+    item('PASS', pass) +
+    item('MODEL', escapeHtml(model), 'signal') +
+    item('COST', cost + costCap, costCap ? 'warn' : '') +
+    item('AVG', avg)
+  );
+}
+
+function renderSidebar() {
+  $('#run-count').textContent = runs.length;
+  const ul = $('#run-list');
+  ul.innerHTML = '';
+  for (const r of runs) {
+    const li = document.createElement('li');
+    if (r.id === selectedId) li.classList.add('active');
+    const locked = isLocked(r);
+    li.innerHTML = `
+      <div class="tgt-title">${escapeHtml(r.title)}</div>
+      <div class="tgt-row">
+        <span class="kind-tag">${r.input.kind}</span>
+        ${statusTag(r.status)}
+        ${sparkline(r.scores)}
+        <span class="run-score ${locked ? 'lock' : ''}" ${locked ? '' : `style="color:${scoreColor(r.bestScore)}"`} title="신호 강도(베스트)" aria-label="신호 강도 ${r.bestScore ?? '없음'}">${r.bestScore ?? '—'}</span>
+      </div>`;
+    li.onclick = () => {
+      selectedId = r.id;
+      selectedIter = null;
+      try { history.replaceState(null, '', '#run=' + encodeURIComponent(r.id)); } catch {}
+      renderSidebar();
+      renderDetail(r.id);
+      if (window.__closeDrawerIfMobile) window.__closeDrawerIfMobile();
+    };
+    ul.appendChild(li);
+  }
+}
+
+async function renderDetail(id) {
+  let run;
+  try {
+    run = await fetchJson('/api/runs/' + id);
+  } catch {
+    $('#detail').innerHTML = '<div class="empty">런을 불러올 수 없습니다.</div>';
+    return;
+  }
+  const best = run.bestIteration != null ? run.iterations.find((i) => i.iteration === run.bestIteration) : null;
+  if (selectedIter == null) selectedIter = run.bestIteration ?? run.currentIteration ?? null;
+
+  const canPause = run.status === 'running';
+  const canResume = run.status === 'paused';
+  const canStop = run.status === 'running' || run.status === 'paused' || run.status === 'pending';
+
+  const firstScore = run.scores && run.scores.length ? run.scores[0].score : null;
+  const delta = run.bestScore != null && firstScore != null ? run.bestScore - firstScore : null;
+  const locked = isLocked(run);
+  const deltaHtml =
+    delta != null
+      ? delta > 0
+        ? `<div class="ro-delta is-ok">+${delta} 첫 패스 대비</div>`
+        : `<div class="ro-delta muted">첫 패스 기준선</div>`
+      : '';
+  const legend = `<span style="color:var(--ok)">●</span> 채택 <span style="color:var(--faint)">○</span> 폐기 <span style="color:var(--lock)">◆</span> 라이브`;
+
+  $('#detail').innerHTML = `
+    <div class="console-head">
+      <h1>${escapeHtml(run.title)}</h1>
+      <div class="ch-controls">
+        ${canPause ? `<button class="ctl-btn pause" data-act="pause">${icon('pause')} 일시정지</button>` : ''}
+        ${canResume ? `<button class="ctl-btn resume" data-act="resume">${icon('play')} 재개</button>` : ''}
+        ${canStop ? `<button class="ctl-btn stop" data-act="stop">${icon('stop')} 중단</button>` : ''}
+      </div>
+    </div>
+    <div class="ch-sub">${statusTag(run.status, true)} <span class="kind-tag">${run.input.kind}</span> <span class="coord">${escapeHtml(run.input.source)}</span></div>
+    ${run.message && !(run.status === 'paused' && run.alert) ? `<div class="ch-sub">${icon('info')} ${escapeHtml(run.message)}</div>` : ''}
+
+    ${renderAlert(run)}
+
+    <section class="acq ${run.status === 'running' ? 'live' : ''}">
+      <div class="eyebrow"><span class="eb-ch">CH·01</span><span class="eb-en">SIGNAL</span><span class="eb-ko">신호 포착 — 패스별 강도</span><span class="eb-right">${legend}</span></div>
+      <div class="acq-grid">
+        <div class="acq-trace"><canvas id="chart" role="img" aria-label="패스별 신호 강도(점수) 수렴 추이"></canvas></div>
+        <div class="acq-readout">
+          <div class="ro-eyebrow">Signal strength</div>
+          <div class="ro-readout ${locked ? '' : 'nolock'}">${run.bestScore ?? '—'}</div>
+          ${locked ? `<div class="ro-lock">${icon('lock')} LOCK</div>` : ''}
+          <div class="ro-meta">${run.bestIteration != null ? `best · pass #${run.bestIteration}` : '미잠금'}</div>
+          <div class="ro-meta">${run.currentIteration} passes</div>
+          ${deltaHtml}
+        </div>
+      </div>
+      <div class="acq-telemetry">${telemetryStrip(run)}</div>
+    </section>
+
+    <div class="work">
+      <section class="panel">
+        <div class="eyebrow"><span class="eb-ch">CH·02</span><span class="eb-en">CHANNELS</span><span class="eb-ko">지적사항 대장</span><span class="eb-right" id="ledger-prog"></span></div>
+        <div id="ledger"></div>
+      </section>
+      <aside class="rail panel">
+        <div class="rail-block">
+          <div class="eyebrow"><span class="eb-ch">CH·03</span><span class="eb-en">DIMENSIONS</span><span class="eb-ko">차원별 점수</span>${best ? `<span class="eb-right">best #${best.iteration}</span>` : ''}</div>
+          <div id="dims" class="dim-bars"></div>
+        </div>
+        <div class="rail-block">
+          <div class="eyebrow"><span class="eb-ch">CH·04</span><span class="eb-en">RESIDUAL</span><span class="eb-ko">남은 개선 포인트</span></div>
+          <ul id="issues" class="issues"></ul>
+        </div>
+      </aside>
+    </div>
+
+    <section class="panel">
+      <div class="eyebrow"><span class="eb-ch">CH·05</span><span class="eb-en">INTEGRATION LOG</span><span class="eb-ko">패스 기록</span></div>
+      <table>
+        <thead><tr><th>#</th><th>강도</th><th>채택</th><th>모델</th><th>소요</th><th>근거</th></tr></thead>
+        <tbody id="iter-rows"></tbody>
+      </table>
+    </section>
+
+    <section class="panel">
+      <div class="eyebrow"><span class="eb-ch">CH·06</span><span class="eb-en">READOUT</span><span class="eb-ko">산출물 — 패스 <span id="iter-sel">#${selectedIter ?? '-'}</span></span><span class="eb-right">
+        <a class="btnlink" id="dl-best" href="/api/runs/${id}/best" target="_blank">베스트 개선본 ↗</a>
+        ${run.input.origFormat ? `<a class="btnlink" id="dl-office" href="/api/runs/${id}/best/office">${icon('download')} .${run.input.origFormat} 다운로드</a>` : ''}
+      </span></div>
+      <div class="tabs">
+        <div class="tab ${activeTab === 'review' ? 'active' : ''}" data-tab="review">리뷰 리포트</div>
+        <div class="tab ${activeTab === 'artifact' ? 'active' : ''}" data-tab="artifact">개선본</div>
+        <div class="tab ${activeTab === 'diff' ? 'active' : ''}" data-tab="diff">원본 대비 diff</div>
+      </div>
+      <div id="viewer" class="viewer inset"></div>
+    </section>
+
+    <section class="panel">
+      <div class="eyebrow"><span class="eb-ch">CH·07</span><span class="eb-en">TELEMETRY</span><span class="eb-ko">로그</span></div>
+      <div id="log" class="log inset"></div>
+    </section>
+  `;
+
+  document.querySelectorAll('.ch-controls .ctl-btn').forEach((b) => {
+    b.onclick = () => controlRun(run.id, b.dataset.act);
+  });
+  bindAlertActions(run);
+  drawChart(run);
+  renderDims(best);
+  renderLedger(run);
+  renderIssues(best, run);
+  renderIterRows(run);
+  renderLog(run);
+  bindTabs(run);
+  await renderViewer(run);
+}
+
+function renderAlert(run) {
+  if (!run.alert || run.status !== 'paused') return '';
+  const a = run.alert;
+  const issues = (a.issues || []).map((i) => `<li>${escapeHtml(i)}</li>`).join('');
+  return `
+    <div class="alert-banner">
+      <div class="alert-head">
+        <span class="alert-ico">${icon('alert')}</span>
+        <span class="alert-title">${escapeHtml(a.title)}</span>
+      </div>
+      <div class="alert-msg">${escapeHtml(a.message)}</div>
+      ${issues ? `<div class="alert-label">반복된 문제</div><ul class="alert-issues">${issues}</ul>` : ''}
+      <div class="alert-actions">
+        <button class="ctl-btn resume" data-act="resume">${icon('play')} 확인하고 재개</button>
+        <button class="ctl-btn stop" data-act="stop">${icon('stop')} 여기서 중단</button>
+      </div>
+    </div>`;
+}
+function bindAlertActions(run) {
+  document.querySelectorAll('.alert-actions .ctl-btn').forEach((b) => {
+    b.onclick = () => controlRun(run.id, b.dataset.act);
+  });
+}
+
+function renderLedger(run) {
+  const el = $('#ledger');
+  const prog = $('#ledger-prog');
+  if (!el) return;
+  const findings = run.findings || [];
+  const open = findings.filter((f) => f.status === 'open');
+  const resolved = findings.filter((f) => f.status === 'resolved');
+  const total = findings.length;
+  const pct = total ? Math.round((resolved.length / total) * 100) : 0;
+  if (prog) prog.innerHTML = total
+    ? `해결 ${resolved.length} / ${total} (${pct}%) &nbsp; <a class="btnlink" href="/api/runs/${run.id}/findings" target="_blank">대장(.md) 열기 ↗</a>`
+    : '';
+
+  if (!total) {
+    el.innerHTML = '<span class="muted">아직 지적사항이 없습니다. 1회차가 끝나면 발견 항목이 여기에 누적됩니다.</span>';
+    return;
+  }
+  const sev = (s) => `<span class="sev sev-${s || 'medium'}">${s || 'medium'}</span>`;
+  const openHtml = open.length
+    ? open
+        .map(
+          (f) => `<li class="lf open">
+            <span class="lf-id">#${f.id}</span>${sev(f.severity)}
+            <span class="lf-title">${escapeHtml(f.title)}</span>
+            <span class="lf-meta">발견 #${f.foundIter}</span></li>`,
+        )
+        .join('')
+    : '<li class="muted">열린 항목 없음 — 모두 해결됨</li>';
+  const resHtml = resolved
+    .map(
+      (f) => `<li class="lf done">
+        <span class="lf-id">#${f.id}</span>${sev(f.severity)}
+        <span class="lf-title">${escapeHtml(f.title)}</span>
+        <span class="lf-meta">#${f.foundIter}→#${f.resolvedIter}</span></li>`,
+    )
+    .join('');
+
+  el.innerHTML = `
+    <div class="ledger-bar"><span style="width:${pct}%"></span></div>
+    <div class="ledger-col-title">열린 항목 (${open.length})</div>
+    <ul class="ledger-list">${openHtml}</ul>
+    ${resolved.length ? `<details class="ledger-done"><summary>해결된 항목 (${resolved.length})</summary><ul class="ledger-list">${resHtml}</ul></details>` : ''}
+  `;
+}
+
+function renderDims(best) {
+  const el = $('#dims');
+  if (!el) return;
+  if (!best || !best.dimensions || !Object.keys(best.dimensions).length) {
+    el.innerHTML = '<span class="muted">데이터 없음</span>';
+    return;
+  }
+  el.innerHTML = Object.entries(best.dimensions)
+    .map(
+      ([k, v]) => `
+    <div class="dim-row">
+      <span class="dim-name">${escapeHtml(k)}</span>
+      <span class="dim-track"><span class="dim-fill" style="width:${v}%;background:${scoreColor(v)}"></span></span>
+      <span class="dim-val" style="color:${scoreColor(v)}">${v}</span>
+    </div>`,
+    )
+    .join('');
+}
+
+function renderIssues(best, run) {
+  const el = $('#issues');
+  if (!el) return;
+  const last = run.iterations[run.iterations.length - 1];
+  const issues = (best && best.remainingIssues) || (last && last.remainingIssues) || [];
+  el.innerHTML = issues.length
+    ? issues.map((i) => `<li>${escapeHtml(i)}</li>`).join('')
+    : '<li class="muted">없음 — 더 개선할 포인트가 보고되지 않았습니다.</li>';
+}
+
+function renderIterRows(run) {
+  const tb = $('#iter-rows');
+  if (!tb) return;
+  tb.innerHTML = run.iterations
+    .map(
+      (it) => `
+    <tr class="iter-row ${it.iteration === selectedIter ? 'active' : ''}" data-iter="${it.iteration}">
+      <td class="mono">#${it.iteration}</td>
+      <td><span class="score-pill" style="color:${scoreColor(it.score)}">${it.score}<span class="score-mini"><span style="width:${it.score}%;background:${scoreColor(it.score)}"></span></span></span></td>
+      <td class="${it.kept ? 'kept-yes' : 'kept-no'}">${it.kept ? '✓ 채택' : '·'}</td>
+      <td class="mono">${escapeHtml(prettyModel(it.model) || '—')}</td>
+      <td class="mono">${(it.durationMs / 1000).toFixed(1)}s</td>
+      <td>${escapeHtml((it.rationale || '').slice(0, 80))}</td>
+    </tr>`,
+    )
+    .join('');
+  tb.querySelectorAll('.iter-row').forEach((row) => {
+    row.onclick = () => {
+      selectedIter = parseInt(row.dataset.iter, 10);
+      $('#iter-sel').textContent = '#' + selectedIter;
+      tb.querySelectorAll('.iter-row').forEach((r) => r.classList.remove('active'));
+      row.classList.add('active');
+      renderViewer(run);
+    };
+  });
+}
+
+function renderLog(run) {
+  const el = $('#log');
+  if (!el) return;
+  el.innerHTML = (run.log || [])
+    .slice(-120)
+    .map(
+      (l) =>
+        `<div class="l-${l.level}"><span class="ts">${l.ts.slice(11, 19)}</span>${escapeHtml(l.msg)}</div>`,
+    )
+    .join('');
+  el.scrollTop = el.scrollHeight;
+}
+
+function bindTabs(run) {
+  document.querySelectorAll('.tab').forEach((t) => {
+    t.onclick = () => {
+      activeTab = t.dataset.tab;
+      document.querySelectorAll('.tab').forEach((x) => x.classList.remove('active'));
+      t.classList.add('active');
+      renderViewer(run);
+    };
+  });
+}
+
+async function renderViewer(run) {
+  const el = $('#viewer');
+  if (!el || selectedIter == null) {
+    if (el) el.innerHTML = '<span class="muted">회차를 선택하세요.</span>';
+    return;
+  }
+  const base = `/api/runs/${run.id}/iterations/${selectedIter}`;
+  if (activeTab === 'review') {
+    const md = await fetchText(base + '/review');
+    el.innerHTML = `<div class="md">${renderMarkdown(md)}</div>`;
+  } else if (activeTab === 'artifact') {
+    const txt = await fetchText(base + '/artifact');
+    el.innerHTML = `<pre>${escapeHtml(txt)}</pre>`;
+  } else {
+    const [orig, improved] = await Promise.all([
+      fetchText('/api/runs/' + run.id + '/input'),
+      fetchText(base + '/artifact'),
+    ]);
+    el.innerHTML = renderDiff(orig, improved);
+  }
+}
+
+// ---------- Convergence Trace (signature; self-contained canvas) ----------
+// Brass instrument trace of score-per-pass: kept = filled jade, discarded =
+// hollow, brass best-so-far datum line, live pass emphasized in brass.
+// Draws in left→right once per run selection (respects reduced-motion).
+function drawChart(run) {
+  _chartRun = run;
+  const c = $('#chart');
+  if (!c) return;
+  if ('ResizeObserver' in window) {
+    if (_chartRO) _chartRO.disconnect();
+    _chartRO = new ResizeObserver(debounce(() => { if ($('#chart') && _chartRun) _drawChart(_chartRun, 1); }, 120));
+    _chartRO.observe(c);
+  }
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const enough = (run.scores || []).length >= 2;
+  if (reduce || !enough || run.id === _lastTraceRunId) {
+    _lastTraceRunId = run.id;
+    _drawChart(run, 1);
+    return;
+  }
+  _lastTraceRunId = run.id;
+  if (_chartAnim) cancelAnimationFrame(_chartAnim);
+  const t0 = performance.now();
+  const tick = (t) => {
+    const p = Math.min(1, (t - t0) / 560);
+    const eased = 1 - Math.pow(1 - p, 3);
+    if (!$('#chart')) return;
+    _drawChart(_chartRun, eased);
+    if (p < 1) _chartAnim = requestAnimationFrame(tick);
+  };
+  _chartAnim = requestAnimationFrame(tick);
+}
+
+function _drawChart(run, prog) {
+  if (prog == null) prog = 1;
+  const canvas = $('#chart');
+  if (!canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth || 600;
+  const h = canvas.clientHeight || 240;
+  canvas.width = w * dpr;
+  canvas.height = h * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+
+  const css = getComputedStyle(document.documentElement);
+  const tok = (n, fb) => (css.getPropertyValue(n).trim() || fb);
+  const SIGNAL = tok('--signal', '#4FD6FF');
+  const LOCK = tok('--lock', '#FFD27A');
+  const OK = tok('--ok', '#5CE6A6');
+  const LINE = tok('--line', '#263352');
+  const FAINT = tok('--faint', '#6E7CA0');
+  const GROUND = tok('--void', '#0A0E1A');
+
+  const data = run.scores || [];
+  const pad = { l: 30, r: 16, t: 16, b: 26 };
+  const cw = w - pad.l - pad.r;
+  const ch = h - pad.t - pad.b;
+
+  ctx.font = '10px ' + tok('--font-mono', 'monospace');
+  ctx.lineWidth = 1;
+  // gridlines + y labels
+  for (let v = 0; v <= 100; v += 25) {
+    const y = pad.t + ch - (v / 100) * ch;
+    ctx.strokeStyle = LINE; ctx.globalAlpha = 0.55;
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
+    ctx.globalAlpha = 1; ctx.fillStyle = FAINT; ctx.fillText(String(v), 6, y + 3);
+  }
+  if (!data.length) return;
+
+  const n = data.length;
+  const xFor = (i) => pad.l + (n === 1 ? cw / 2 : (i / (n - 1)) * cw);
+  const yFor = (s) => pad.t + ch - (s / 100) * ch;
+
+  // noise floor — faint dotted baseline at the weakest pass
+  const floor = Math.min(...data.map((d) => d.score));
+  const fy = yFor(floor);
+  ctx.save();
+  ctx.setLineDash([2, 4]); ctx.strokeStyle = FAINT; ctx.globalAlpha = 0.5;
+  ctx.beginPath(); ctx.moveTo(pad.l, fy); ctx.lineTo(w - pad.r, fy); ctx.stroke();
+  ctx.globalAlpha = 0.85; ctx.fillStyle = FAINT;
+  ctx.fillText('noise', w - pad.r - 32, fy - 4);
+  ctx.restore();
+
+  // best-so-far datum — the LOCK line (gold dashed)
+  const best = Math.max(...data.map((d) => d.score));
+  const by = yFor(best);
+  ctx.save();
+  ctx.setLineDash([4, 4]); ctx.strokeStyle = LOCK; ctx.globalAlpha = 0.6;
+  ctx.beginPath(); ctx.moveTo(pad.l, by); ctx.lineTo(w - pad.r, by); ctx.stroke();
+  ctx.restore();
+
+  // points to render this frame (left→right draw-in)
+  const drawn = n === 1 ? 0 : prog * (n - 1);
+  const lastI = Math.floor(drawn + 1e-6);
+  const frac = drawn - lastI;
+  const pts = [];
+  for (let i = 0; i <= Math.min(lastI, n - 1); i++) pts.push([xFor(i), yFor(data[i].score)]);
+  if (lastI < n - 1 && frac > 0) {
+    pts.push([
+      xFor(lastI) + (xFor(lastI + 1) - xFor(lastI)) * frac,
+      yFor(data[lastI].score) + (yFor(data[lastI + 1].score) - yFor(data[lastI].score)) * frac,
+    ]);
+  }
+
+  // area fill (azure signal)
+  if (pts.length) {
+    const grad = ctx.createLinearGradient(0, pad.t, 0, pad.t + ch);
+    grad.addColorStop(0, 'rgba(79,214,255,0.16)');
+    grad.addColorStop(1, 'rgba(79,214,255,0.012)');
+    ctx.beginPath(); ctx.moveTo(pts[0][0], pad.t + ch);
+    pts.forEach((p) => ctx.lineTo(p[0], p[1]));
+    ctx.lineTo(pts[pts.length - 1][0], pad.t + ch); ctx.closePath();
+    ctx.fillStyle = grad; ctx.fill();
+  }
+
+  // signal trace (azure)
+  ctx.strokeStyle = SIGNAL; ctx.lineWidth = 2.25; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  ctx.beginPath();
+  pts.forEach((p, i) => (i === 0 ? ctx.moveTo(p[0], p[1]) : ctx.lineTo(p[0], p[1])));
+  ctx.stroke();
+
+  // nodes: kept = filled ok-green, discarded = hollow; live(last) = gold LOCK + halo
+  for (let i = 0; i <= Math.min(lastI, n - 1); i++) {
+    const d = data[i], x = xFor(i), y = yFor(d.score), isLast = i === n - 1;
+    if (isLast) {
+      ctx.fillStyle = LOCK;
+      ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = LOCK; ctx.globalAlpha = 0.35; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(x, y, 9, 0, Math.PI * 2); ctx.stroke(); ctx.globalAlpha = 1;
+    } else if (d.kept) {
+      ctx.fillStyle = OK;
+      ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2); ctx.fill();
+    } else {
+      ctx.fillStyle = GROUND; ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = FAINT; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.fillStyle = FAINT; ctx.fillText('#' + d.iteration, x - 7, h - 8);
+  }
+}
+
+// ---------- 미니 마크다운 ----------
+function renderMarkdown(md) {
+  if (!md) return '<span class="muted">없음</span>';
+  const lines = md.split('\n');
+  let html = '';
+  let inList = false;
+  let inCode = false;
+  for (let raw of lines) {
+    if (raw.trim().startsWith('```')) {
+      if (!inCode) { html += '<pre class="code">'; inCode = true; }
+      else { html += '</pre>'; inCode = false; }
+      continue;
+    }
+    if (inCode) { html += escapeHtml(raw) + '\n'; continue; }
+    let line = inlineMd(escapeHtml(raw));
+    if (/^### /.test(raw)) { closeList(); html += '<h3>' + inlineMd(escapeHtml(raw.slice(4))) + '</h3>'; }
+    else if (/^## /.test(raw)) { closeList(); html += '<h2>' + inlineMd(escapeHtml(raw.slice(3))) + '</h2>'; }
+    else if (/^# /.test(raw)) { closeList(); html += '<h1>' + inlineMd(escapeHtml(raw.slice(2))) + '</h1>'; }
+    else if (/^\s*[-*] /.test(raw)) {
+      if (!inList) { html += '<ul>'; inList = true; }
+      html += '<li>' + inlineMd(escapeHtml(raw.replace(/^\s*[-*] /, ''))) + '</li>';
+    } else if (raw.trim() === '') { closeList(); }
+    else { closeList(); html += '<p>' + line + '</p>'; }
+  }
+  closeList();
+  if (inCode) html += '</pre>';
+  return html;
+  function closeList() { if (inList) { html += '</ul>'; inList = false; } }
+}
+function inlineMd(s) {
+  return s
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>');
+}
+
+// ---------- 라인 단위 diff (간단 LCS) ----------
+function renderDiff(a, b) {
+  const A = (a || '').split('\n');
+  const B = (b || '').split('\n');
+  const m = A.length, n = B.length;
+  if (m * n > 4_000_000) {
+    return `<div class="muted">파일이 커서 diff 생략. 개선본/원본 탭을 직접 비교하세요.</div>`;
+  }
+  const dp = Array.from({ length: m + 1 }, () => new Int32Array(n + 1));
+  for (let i = m - 1; i >= 0; i--)
+    for (let j = n - 1; j >= 0; j--)
+      dp[i][j] = A[i] === B[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  let i = 0, j = 0, out = '';
+  while (i < m && j < n) {
+    if (A[i] === B[j]) { out += diffLine(' ', A[i]); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { out += diffLine('-', A[i]); i++; }
+    else { out += diffLine('+', B[j]); j++; }
+  }
+  while (i < m) out += diffLine('-', A[i++]);
+  while (j < n) out += diffLine('+', B[j++]);
+  return out || '<span class="muted">차이 없음</span>';
+}
+function diffLine(sign, text) {
+  const cls = sign === '+' ? 'diff-add' : sign === '-' ? 'diff-del' : '';
+  return `<div class="diff-line ${cls}">${escapeHtml(sign + ' ' + text)}</div>`;
+}
+
+function escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+// ---------- 실시간 ----------
+function connectSSE() {
+  const es = new EventSource('/api/stream');
+  es.addEventListener('hello', () => {
+    $('#conn').classList.add('live');
+    $('#conn .conn-text').textContent = 'live';
+  });
+  es.addEventListener('change', () => loadRuns());
+  es.onerror = () => {
+    $('#conn').classList.remove('live');
+    $('#conn .conn-text').textContent = 'linking…';
+  };
+}
+
+initForm();
+initShell();
+loadRuns();
+connectSSE();

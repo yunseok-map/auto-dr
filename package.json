@@ -1,0 +1,36 @@
+{
+  "name": "auto-dr",
+  "version": "0.1.0",
+  "description": "자율 문서/코드/웹 리뷰·개선 루프 (Claude Code 기반)",
+  "type": "module",
+  "bin": {
+    "auto-dr": "src/cli.ts"
+  },
+  "scripts": {
+    "start": "tsx src/cli.ts dashboard --open",
+    "dev": "tsx src/cli.ts",
+    "review": "tsx src/cli.ts review",
+    "dashboard": "tsx src/cli.ts dashboard",
+    "list": "tsx src/cli.ts list",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "chokidar": "^3.6.0",
+    "commander": "^12.1.0",
+    "docx": "^9.7.1",
+    "express": "^4.19.2",
+    "jszip": "^3.10.1",
+    "mammoth": "^1.8.0",
+    "multer": "^1.4.5-lts.1",
+    "pdf-parse": "^1.1.1",
+    "pdfkit": "^0.19.1",
+    "pptxgenjs": "^4.0.1"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/multer": "^1.4.12",
+    "@types/node": "^22.7.4",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.2"
+  }
+}

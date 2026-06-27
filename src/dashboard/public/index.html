@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <title>auto-dr · ACQUISITION CONSOLE</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header>
+      <div class="brand">
+        <button id="nav-toggle" class="nav-toggle" aria-label="메뉴 열기" aria-controls="sidebar" aria-expanded="false">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
+        <span class="logo" aria-hidden="true">
+          <!-- stacked drafts / polishing monogram -->
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M7 4h7l4 4v6"/><path d="M14 4v4h4"/>
+            <path d="M4 9v9a2 2 0 0 0 2 2h8"/>
+            <path d="M17.5 16.5l1.8 1.8M21 21l-1.7-1.7"/>
+          </svg>
+        </span>
+        <div class="brand-text">
+          <span class="brand-name">auto<span class="dot">·</span>dr</span>
+          <span class="brand-sub">문서를 한 장씩 다듬어요</span>
+        </div>
+      </div>
+      <div class="head-right">
+        <div id="live-chip" class="live-chip" role="status" aria-live="polite"><span class="pip" aria-hidden="true"></span><span class="lc-text">분석 중&nbsp;</span><span id="live-count">0</span>건</div>
+        <button id="notify-btn" class="ghost-btn" title="자동 일시정지 시 데스크톱 알림 받기">
+          <span class="ic" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg></span>
+          <span class="notify-label">알림 켜기</span>
+        </button>
+        <div id="conn" class="conn" role="status" aria-live="polite"><span class="conn-dot"></span><span class="conn-text">연결 중…</span></div>
+      </div>
+    </header>
+
+    <div class="layout">
+      <div id="scrim" hidden></div>
+      <aside id="sidebar" aria-label="런 목록 및 새 리뷰">
+        <div class="new-review">
+          <div class="nr-title">
+            <span class="ic" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18M3 12h18"/></svg></span>
+            새 분석
+          </div>
+          <div class="seg" id="method-seg" role="tablist">
+            <button class="seg-btn active" data-method="file">
+              <span class="ic" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></span>
+              파일 업로드
+            </button>
+            <button class="seg-btn" data-method="url">
+              <span class="ic" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg></span>
+              URL / 경로
+            </button>
+          </div>
+
+          <div id="drop" class="drop" role="button" tabindex="0" aria-label="파일 선택: 끌어다 놓거나 클릭하세요">
+            <input type="file" id="file-input" hidden />
+            <div class="drop-inner">
+              <div class="drop-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M5 20h14"/></svg></div>
+              <div>파일을 끌어다 놓거나<br /><span class="link">클릭해서 선택하세요</span></div>
+            </div>
+            <div id="file-name" class="file-name"></div>
+          </div>
+
+          <input id="url-input" class="text-input hidden" type="text" placeholder="https://example.com 또는 C:\\경로\\폴더" />
+
+          <label class="fld">리뷰 초점
+            <select id="focus-select"></select>
+          </label>
+
+          <details class="adv">
+            <summary>고급 옵션</summary>
+            <div class="adv-body">
+              <label class="fld">입력 종류
+                <select id="kind-select">
+                  <option value="auto">자동 감지</option>
+                  <option value="document">문서</option>
+                  <option value="url">웹사이트</option>
+                  <option value="code">코드</option>
+                </select>
+              </label>
+              <label class="fld">최대 반복 횟수 (안전 상한)
+                <input id="maxiter-input" class="text-input" type="number" min="1" placeholder="5" />
+              </label>
+              <label class="fld">같은 문제 반복 감지 (회)
+                <input id="recur-input" class="text-input" type="number" min="2" placeholder="3" />
+              </label>
+              <label class="fld">회차당 비용 상한 ($, 선택)
+                <input id="maxcost-input" class="text-input" type="number" min="0" step="0.01" placeholder="제한 없음" />
+              </label>
+              <label class="fld">런 총비용 상한 ($, 선택)
+                <input id="maxtotalcost-input" class="text-input" type="number" min="0" step="0.01" placeholder="기본 $0.50 — 누적 도달 시 종료 (0=해제)" />
+              </label>
+              <label class="fld">모델당 최대 시도 (자동 라우팅)
+                <input id="maxattempts-input" class="text-input" type="number" min="1" placeholder="2" />
+              </label>
+              <label class="fld">호출 방식
+                <select id="provider-select">
+                  <option value="">Claude Code 구독 (기본 · claude -p)</option>
+                  <option value="anthropic">Anthropic API (Claude) — 키 필요</option>
+                  <option value="openai">OpenAI (GPT) — 키 필요</option>
+                  <option value="gemini">Google Gemini — 키 필요</option>
+                </select>
+              </label>
+
+              <label class="fld" id="cli-model-wrap">모델
+                <select id="model-select">
+                  <option value="">자동 (추천) — 분량·종류로 선택 + 정체 시 자동 승급</option>
+                  <option value="opus">Opus — 최고 품질(고정)</option>
+                  <option value="sonnet">Sonnet — 균형(고정)</option>
+                  <option value="haiku">Haiku — 빠름·저렴(고정)</option>
+                </select>
+              </label>
+
+              <label class="fld hidden" id="provider-model-wrap">API 모델 id
+                <input id="provider-model" class="text-input" type="text" placeholder="예: claude-haiku-4-5 / gpt-4o-mini / gemini-2.0-flash" />
+              </label>
+
+              <details class="adv" id="keys-adv">
+                <summary>API 키 (직접 호출용 · 이 PC에만 저장)</summary>
+                <div class="adv-body">
+                  <label class="fld">Anthropic 키 <input id="key-anthropic" class="text-input" type="password" placeholder="sk-ant-…" autocomplete="off" /></label>
+                  <label class="fld">OpenAI 키 <input id="key-openai" class="text-input" type="password" placeholder="sk-…" autocomplete="off" /></label>
+                  <label class="fld">Gemini 키 <input id="key-gemini" class="text-input" type="password" placeholder="AIza…" autocomplete="off" /></label>
+                  <button type="button" id="keys-save" class="rubric-add">키 저장</button>
+                  <div id="keys-msg" class="nr-msg"></div>
+                </div>
+              </details>
+
+              <div class="rubric-fld">
+                <label class="rubric-switch"><input type="checkbox" id="panel-on" /> 다각도 리뷰 (여러 관점 병렬 + 검증)</label>
+                <label class="rubric-switch panel-sub hidden" id="verify-wrap"><input type="checkbox" id="verify-on" checked /> 지적 진위 검증 (헛지적 거르기)</label>
+                <label class="rubric-switch" style="margin-top: 10px"><input type="checkbox" id="emit-on" /> 변경 내역 만들기 (무엇을 왜 바꿨는지)</label>
+              </div>
+
+              <div class="rubric-fld">
+                <label class="rubric-switch"><input type="checkbox" id="compare-on" /> A/B 비교 (두 설정을 나란히 실행)</label>
+                <div id="compare-box" class="rubric-box hidden">
+                  <div class="cmp-variant"><span class="cmp-tag">A</span>
+                    <select id="focusA" class="text-input"></select>
+                    <select id="modelA" class="text-input"><option value="">자동</option><option value="opus">Opus</option><option value="sonnet">Sonnet</option><option value="haiku">Haiku</option></select>
+                  </div>
+                  <div class="cmp-variant"><span class="cmp-tag">B</span>
+                    <select id="focusB" class="text-input"></select>
+                    <select id="modelB" class="text-input"><option value="">자동</option><option value="opus">Opus</option><option value="sonnet">Sonnet</option><option value="haiku">Haiku</option></select>
+                  </div>
+                </div>
+              </div>
+
+              <label class="fld">참고자료 (선택, 여러 개 — 스타일가이드·사양서 등 기준 문서)
+                <input id="refs-input" class="text-input" type="file" multiple />
+              </label>
+
+              <div class="rubric-fld">
+                <label class="rubric-switch"><input type="checkbox" id="rubric-on" /> 맞춤 평가 기준 사용</label>
+                <div id="rubric-box" class="rubric-box hidden">
+                  <select id="rubric-template" class="text-input">
+                    <option value="">템플릿 선택…</option>
+                    <option value="문서">문서</option>
+                    <option value="코드">코드</option>
+                    <option value="이력서">이력서</option>
+                    <option value="마케팅">마케팅</option>
+                  </select>
+                  <div class="rubric-head"><span>평가 항목</span><span>가중치</span></div>
+                  <div id="rubric-dims"></div>
+                  <button type="button" id="rubric-add" class="rubric-add">+ 항목 추가</button>
+                  <label class="rubric-pass">합격선(이 점수 도달 시 완료)
+                    <input id="rubric-pass-input" type="number" min="1" max="100" placeholder="예: 90" />
+                  </label>
+                </div>
+              </div>
+            </div>
+          </details>
+
+          <button id="start-btn" class="start-btn">
+            <span class="ic" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4.5v15l13-7.5z" fill="currentColor" stroke="none"/></svg></span>
+            분석 시작
+          </button>
+          <div id="nr-msg" class="nr-msg" role="status" aria-live="polite"></div>
+        </div>
+
+        <div class="sidebar-head">내 분석 <span id="run-count" class="badge">0</span></div>
+        <ul id="run-list"></ul>
+      </aside>
+
+      <main id="detail" aria-live="polite">
+        <div class="empty">
+          <div class="empty-ico pulse" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3h7l4 4v11a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M14 3v4h4"/><path d="M9 13l1.2 2.4L12.6 16.6 10.2 17.8 9 20.2 7.8 17.8 5.4 16.6 7.8 15.4z" fill="currentColor" stroke="none"/></svg></div>
+          <div><strong>분석할 문서를 올려주세요</strong>왼쪽에서 파일을 올리거나 주소·경로를 넣으면<br />한 장씩 다듬기 시작해요.</div>
+        </div>
+      </main>
+    </div>
+
+    <div id="toasts" class="toasts" role="region" aria-label="알림"></div>
+    <script src="app.js"></script>
+  </body>
+</html>
