@@ -3,7 +3,7 @@
 export type InputKind = 'document' | 'url' | 'code';
 
 // V5: 호출 백엔드. cli = claude -p(구독), 나머지는 해당 provider API 직접 호출.
-export type ProviderId = 'cli' | 'anthropic' | 'openai' | 'gemini';
+export type ProviderId = 'cli' | 'anthropic' | 'openai' | 'gemini' | 'together' | 'nemotron';
 
 export interface RunInput {
   kind: InputKind;
@@ -84,7 +84,8 @@ export interface EditOp {
   find: string; // 현재본에 '정확히(공백·줄바꿈 포함)' 존재하는 변경 대상 텍스트
   replace: string; // 그 자리에 들어갈 새 텍스트(삭제는 빈 문자열)
   reason?: string; // V4: 이 수정을 왜 했는지(변경 추적 산출물용)
-  findingId?: number; // V4: 이 수정이 해결하는 지적 #번호
+  findingId?: number; // V4: 이 수정이 해결하는 지적 #번호(단일 — 하위호환)
+  findingIds?: number[]; // R1: 한 edit 이 여러 지적을 해결할 때 그 #번호들
 }
 
 export interface IterationResult {
@@ -103,7 +104,14 @@ export interface IterationResult {
   costUsd?: number;
   model?: string; // 실제로 사용된 모델(envelope 실측)
   tokens?: TokenUsage; // 이 회차 토큰 사용 내역
+  stages?: StageTime[]; // U3: 회차 내 단계별 소요(리뷰/검증/개선/채점). 간트 시각화용
   raw?: string; // claude 원본 응답(디버그용)
+}
+
+// U3: 한 회차 안의 단계별 소요 시간(ms). panel 은 렌즈/검증/개선, 단일은 개선, 공통으로 채점.
+export interface StageTime {
+  name: string; // 리뷰 · 검증 · 개선 · 채점
+  ms: number;
 }
 
 export type RunStatus =
@@ -116,6 +124,7 @@ export type RunStatus =
   | 'stopped_done' // 에이전트가 완료 선언
   | 'stopped_cap' // 안전 상한 도달(반복 횟수)
   | 'stopped_cost' // 런 총비용 상한 도달
+  | 'stopped_ratelimit' // Claude 사용/세션 한도 도달(일시적 — 리셋 후 재시도 가능)
   | 'error'
   | 'completed';
 
@@ -140,6 +149,7 @@ export interface IterationSummary {
   costUsd?: number;
   model?: string; // 이 반복에서 실제 사용된 모델
   tokens?: TokenUsage; // 이 반복 토큰 사용 내역
+  stages?: StageTime[]; // U3: 단계별 소요(간트 시각화용)
 }
 
 export interface RunConfig {
@@ -152,6 +162,15 @@ export interface RunConfig {
   maxCostPerIterUsd?: number; // 회차당 비용 상한($). 설정 시 claude --max-budget-usd 로 전달
   maxTotalCostUsd?: number; // 런 전체 누적 비용 상한($). 초과 시 다음 호출 전에 종료(stopped_cost)
   maxAttemptsPerModel?: number; // 자동 라우팅에서 한 모델로 시도할 최대 회차. 소진 시 다음 단계로 승급
+  useJudge?: boolean; // 독립 채점기 사용(개선 모델과 분리된 모델이 점수를 매김). 기본 true
+  judgeModel?: string; // 채점기 모델(cli 경로). 미지정 시 기본값. API provider면 그 provider 모델 사용
+  laterPassLenses?: number; // panel: 2회차 이후 사용할 렌즈 수(품질↔토큰 노브). 기본 1
+  laterPassVerify?: boolean; // panel: 2회차 이후에도 검증 패스를 돌릴지. 기본 false
+  laterPassMaxNew?: number; // R2: 2회차 이후 회차당 새로 받을 지적 최대 수(열린 항목 해결 우선). 기본 3
+  finalPass?: boolean; // 완료 직전 강한 모델로 전체를 한 번 정밀검증/마무리. 기본 true
+  finalPassModel?: string; // 마무리 패스 모델(cli). 미지정 시 사다리 최상위(보통 opus)
+  webhookUrl?: string; // #10: 종료 시 요약을 POST 할 웹훅 URL(Slack incoming webhook 등). 기본 env AUTODR_WEBHOOK_URL
+  autoResume?: boolean; // #2: 세션 한도로 멈추면 리셋 시각에 자동 이어하기. 기본 false
   // ── V4 (전부 optional, 미설정 시 기존 동작) ──
   reviewMode?: 'single' | 'panel'; // panel: 다각도 병렬 리뷰 + 검증
   lenses?: string[]; // panel 렌즈 목록(미설정 시 기본 렌즈)
@@ -186,6 +205,10 @@ export interface RunState {
   refsDigest?: string; // 참고자료 압축 요약(1회 생성, 매 패스 주입)
   changeLog?: ChangeEntry[]; // 누적 변경 내역(emitChanges)
   compare?: { groupId: string; variant: 'A' | 'B'; label?: string; peerId?: string }; // A/B 비교
+  parentId?: string; // 이어하기(resume)로 만들어진 런이면 원본 런 id
+  officeInPlace?: boolean; // 오피스 개선본을 원본 양식 제자리 수정으로 만들었는지(true면 정리본도 별도 존재)
+  resumeAt?: string; // #2: 세션 한도로 멈춘 경우, 자동 이어하기 예정 시각(ISO). UI 카운트다운에도 사용
+  autoResumedAt?: string; // #2: 자동 이어하기가 트리거된 시각(중복 트리거 방지)
   log: LogEntry[];
 }
 

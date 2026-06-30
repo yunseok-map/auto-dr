@@ -1,4 +1,4 @@
-import type { Rubric, RubricDimension } from '../types.js';
+import type { InputKind, Rubric, RubricDimension } from '../types.js';
 
 // 맞춤 평가 기준 템플릿 — 대시보드에서 골라 시작점으로 쓰고 편집한다.
 export const RUBRIC_TEMPLATES: Record<string, Rubric> = {
@@ -47,6 +47,18 @@ export const RUBRIC_TEMPLATES: Record<string, Rubric> = {
     ],
   },
 };
+
+// #8: 입력 종류(+초점)로 적절한 평가기준 템플릿을 추천. 대시보드에서 시작점으로 자동 선택.
+export function suggestRubric(kind: InputKind, focus?: string): { template: string; rubric: Rubric } {
+  const f = (focus || '').toLowerCase();
+  let key: string;
+  if (kind === 'code') key = 'code';
+  else if (kind === 'url') key = 'marketing';
+  else if (/이력서|resume|cv|자기소개|자소서/.test(f)) key = 'resume';
+  else if (/마케팅|market|seo|카피|광고|홍보/.test(f)) key = 'marketing';
+  else key = 'document';
+  return { template: key, rubric: RUBRIC_TEMPLATES[key] };
+}
 
 // 외부(대시보드/API)에서 들어온 rubric을 안전하게 정규화한다. 잘못되면 null.
 export function normalizeRubric(raw: unknown): Rubric | null {

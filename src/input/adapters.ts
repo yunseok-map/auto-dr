@@ -1,11 +1,18 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import dns from 'node:dns/promises';
+import net from 'node:net';
+import { buildWebArtifact, extractWebMeta, type UrlMode, type WebMeta } from './web.js';
+import { renderHtml } from './render.js';
 import type { InputKind, OfficeFormat, RunInput } from '../types.js';
+
+export type UrlRender = 'off' | 'auto' | 'on';
 
 const CODE_EXTS = new Set([
   '.js', '.jsx', '.ts', '.tsx', '.py', '.java', '.c', '.cc', '.cpp', '.h', '.hpp',
   '.cs', '.go', '.rs', '.rb', '.php', '.swift', '.kt', '.scala', '.sh', '.ps1',
   '.sql', '.html', '.css', '.scss', '.vue', '.svelte', '.json', '.yaml', '.yml',
+  '.svg', '.xml', // 마크업: 개선본을 같은 확장자(.svg/.xml)로 저장해 원본처럼 열람·미리보기 가능
 ]);
 const DOC_TEXT_EXTS = new Set(['.md', '.markdown', '.txt', '.rst', '.adoc', '.text']);
 
@@ -20,12 +27,16 @@ export function detectKind(source: string): InputKind {
   return 'document';
 }
 
-export async function resolveInput(source: string, kindOverride?: InputKind): Promise<RunInput> {
+export async function resolveInput(
+  source: string,
+  kindOverride?: InputKind,
+  opts: { urlMode?: UrlMode; urlRender?: UrlRender; urlCrawl?: number; urlCheckLinks?: boolean } = {},
+): Promise<RunInput> {
   const kind = kindOverride ?? detectKindAsync(source);
   const resolvedKind = await kind;
   switch (resolvedKind) {
     case 'url':
-      return await fromUrl(source);
+      return await fromUrl(source, opts.urlMode ?? 'full', opts.urlRender ?? 'auto', opts.urlCrawl ?? 1, opts.urlCheckLinks ?? false);
     case 'code':
       return await fromCode(source);
     default:
@@ -163,45 +174,175 @@ function decodeXml(s: string): string {
 }
 
 // ---------- 웹사이트 URL ----------
-async function fromUrl(source: string): Promise<RunInput> {
+// SSRF 가드: 사용자가 넣은 URL이 내부망/루프백/링크로컬/메타데이터 주소로 향하지 않게 차단.
+// 도메인은 실제 해석된 IP까지 검사한다(domain→사설IP 우회 방지).
+export function isPrivateIp(ip: string): boolean {
+  if (net.isIPv4(ip)) {
+    const [a, b] = ip.split('.').map(Number);
+    if (a === 10 || a === 127 || a === 0) return true; // 사설/루프백/예약
+    if (a === 172 && b >= 16 && b <= 31) return true; // 172.16~31
+    if (a === 192 && b === 168) return true; // 192.168
+    if (a === 169 && b === 254) return true; // 링크로컬(클라우드 메타데이터 169.254.169.254 포함)
+    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+    return false;
+  }
+  if (net.isIPv6(ip)) {
+    const v = ip.toLowerCase();
+    if (v === '::1' || v === '::') return true; // 루프백/미지정
+    if (v.startsWith('fc') || v.startsWith('fd')) return true; // ULA
+    if (v.startsWith('fe80')) return true; // 링크로컬
+    if (v.startsWith('::ffff:')) return isPrivateIp(v.slice(7)); // IPv4-mapped
+    return false;
+  }
+  return false;
+}
+
+async function assertPublicUrl(source: string): Promise<void> {
+  let u: URL;
+  try {
+    u = new URL(source);
+  } catch {
+    throw new Error(`잘못된 URL: ${source}`);
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    throw new Error(`허용되지 않은 프로토콜: ${u.protocol}`);
+  }
+  const host = u.hostname;
+  if (host === 'localhost' || host.endsWith('.localhost')) {
+    throw new Error('내부 주소(localhost)로의 요청은 차단됩니다.');
+  }
+  // 호스트가 IP면 바로 검사, 도메인이면 해석된 모든 주소를 검사.
+  const ips = net.isIP(host) ? [host] : (await dns.lookup(host, { all: true })).map((a) => a.address);
+  if (!ips.length || ips.some(isPrivateIp)) {
+    throw new Error(`내부망/예약 주소로의 요청은 차단됩니다: ${host}`);
+  }
+}
+
+async function fromUrl(
+  source: string,
+  mode: UrlMode = 'full',
+  render: UrlRender = 'auto',
+  crawl = 1,
+  checkLinks = false,
+): Promise<RunInput> {
+  await assertPublicUrl(source);
+  // 참고: 리다이렉트는 따라가되(http→https 등 정상 동작 보존) 최초 대상 주소만 사전 검증한다.
   const res = await fetch(source, { headers: { 'User-Agent': 'auto-dr/0.1' } });
   if (!res.ok) throw new Error(`URL 가져오기 실패: ${res.status} ${res.statusText}`);
   const ct = res.headers.get('content-type') ?? '';
-  const body = await res.text();
-  let artifact: string;
-  if (ct.includes('text/html')) {
-    artifact = htmlToText(body);
-  } else {
-    artifact = body; // 원시 텍스트/코드 등은 그대로
+  let body = await res.text();
+  let rendered: 'static' | 'rendered' | 'render-failed' = 'static';
+
+  // JS 렌더링 결정: 'on'=항상, 'auto'=정적 HTML 이 SPA 빈 셸로 보일 때만, 'off'=안 함.
+  const isHtml = ct.includes('text/html') || /^\s*<(!doctype|html)/i.test(body);
+  const needRender =
+    isHtml && (render === 'on' || (render === 'auto' && extractWebMeta(body, source).likelySpa));
+  if (needRender) {
+    try {
+      body = await renderHtml(source);
+      rendered = 'rendered';
+    } catch {
+      rendered = 'render-failed'; // 브라우저 미설치/타임아웃 → 정적 HTML 로 폴백
+    }
+  }
+
+  // 리치 분석: 구조/SEO/접근성 요약 + (full/source 모드면) HTML 소스 + 동일 출처 CSS/JS 까지 묶는다.
+  const { artifact, title, meta } = await buildWebArtifact(body, source, ct, mode, rendered);
+  let extra = '';
+  // #9: 다중 페이지 크롤(같은 도메인 내부 링크, 정적 분석)
+  if (meta && crawl > 1) {
+    try {
+      extra += await crawlSummary(source, meta, Math.min(crawl, 8));
+    } catch {
+      /* 크롤 실패 무시 */
+    }
+  }
+  // #10: 링크 유효성 검사(내부/사설 주소 제외)
+  if (meta && checkLinks) {
+    try {
+      extra += await checkLinksSection(meta.allLinks);
+    } catch {
+      /* 링크검사 실패 무시 */
+    }
   }
   return {
     kind: 'url',
     source,
-    title: source,
-    artifact,
+    title,
+    artifact: artifact + extra,
     ext: 'md',
-    meta: { contentType: ct },
+    meta: { contentType: ct, urlMode: mode, rendered, crawl, checkLinks, web: meta ?? undefined },
   };
 }
 
-function htmlToText(html: string): string {
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
-    .replace(/<head[\s\S]*?<\/head>/gi, ' ')
-    .replace(/<\/(p|div|section|article|h[1-6]|li|tr|br)>/gi, '\n')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/[ \t]+/g, ' ')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+// #9: 같은 도메인 내부 링크를 BFS 로 따라가 페이지별 구조 요약(정적). maxPages 까지.
+async function crawlSummary(startUrl: string, mainMeta: WebMeta, maxPages: number): Promise<string> {
+  const visited = new Set([startUrl.split('#')[0]]);
+  const queue = [...mainMeta.internalLinks];
+  const pages: { url: string; meta: WebMeta }[] = [];
+  while (queue.length && pages.length < maxPages - 1) {
+    const u = queue.shift()!;
+    if (visited.has(u)) continue;
+    visited.add(u);
+    try {
+      await assertPublicUrl(u);
+      const r = await fetch(u, { headers: { 'User-Agent': 'auto-dr/0.1' }, signal: AbortSignal.timeout(10_000) });
+      if (!r.ok || !(r.headers.get('content-type') ?? '').includes('text/html')) continue;
+      const meta = extractWebMeta(await r.text(), u);
+      pages.push({ url: u, meta });
+      for (const l of meta.internalLinks) if (!visited.has(l) && queue.length < 100) queue.push(l);
+    } catch {
+      /* 페이지 실패 무시 */
+    }
+  }
+  if (!pages.length) return '';
+  const lines = ['', '', `## 추가 페이지 크롤 (${pages.length}개 · 정적 분석)`];
+  for (const p of pages) {
+    const h1 = p.meta.headings.find((h) => h.level === 1);
+    lines.push(`- **${p.url}**`);
+    lines.push(
+      `  - 제목: ${p.meta.title || '⚠️ 없음'} · h1: ${h1 ? h1.text : '⚠️ 없음'} · 단어 ${p.meta.wordCount} · 이미지 alt없음 ${p.meta.images.missingAlt}/${p.meta.images.total} · 링크 ${p.meta.links.total}${p.meta.description ? '' : ' · ⚠️ 메타설명 없음'}`,
+    );
+  }
+  return lines.join('\n');
+}
+
+// #10: 링크 상태 검사 — HEAD(필요시 GET) 로 4xx/5xx/네트워크 오류 탐지. 내부/사설은 안전상 건너뜀.
+async function checkLinksSection(links: string[], max = 40): Promise<string> {
+  const uniq = [...new Set(links)].slice(0, max);
+  const results: { u: string; status: string; ok: boolean; skip?: boolean }[] = [];
+  let idx = 0;
+  const worker = async () => {
+    while (idx < uniq.length) {
+      const u = uniq[idx++];
+      try {
+        await assertPublicUrl(u);
+      } catch {
+        results.push({ u, status: '건너뜀(내부)', ok: true, skip: true });
+        continue;
+      }
+      try {
+        let r = await fetch(u, { method: 'HEAD', redirect: 'follow', headers: { 'User-Agent': 'auto-dr/0.1' }, signal: AbortSignal.timeout(8000) });
+        if (r.status === 405 || r.status === 501 || r.status === 403) {
+          r = await fetch(u, { method: 'GET', headers: { 'User-Agent': 'auto-dr/0.1' }, signal: AbortSignal.timeout(8000) });
+        }
+        results.push({ u, status: String(r.status), ok: r.ok });
+      } catch {
+        results.push({ u, status: '연결오류', ok: false });
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: 6 }, worker));
+  const broken = results.filter((r) => !r.ok && !r.skip);
+  const checked = results.filter((r) => !r.skip).length;
+  const lines = ['', '', `## 링크 상태 검사 (${checked}개 확인)`, `- 정상 ${checked - broken.length} · 문제 ${broken.length}`];
+  if (broken.length) {
+    lines.push('- ⚠️ 문제 링크:');
+    for (const b of broken) lines.push(`  - [${b.status}] ${b.u}`);
+  } else {
+    lines.push('- ✅ 깨진 링크 없음');
+  }
+  return lines.join('\n');
 }
 
 // ---------- 로컬 코드 (파일 또는 디렉터리) ----------

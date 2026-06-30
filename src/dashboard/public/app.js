@@ -4,6 +4,7 @@ let runs = [];
 let selectedId = null;
 let selectedIter = null;
 let activeTab = 'review';
+let highlightQuery = null; // #C: 대장→개선본 연결 시 본문에서 강조할 인용구
 let cmpVariant = null; // A/B 비교 뷰에서 하단 상세로 보고 있는 변형
 let notifyEnabled = false;
 const seenAlerts = new Set(); // runId:ts → 알림 1회만 발생
@@ -43,7 +44,6 @@ const ICONS = {
 };
 function icon(name, cls) { return `<span class="ic ${cls || ''}" aria-hidden="true">${ICONS[name] || ''}</span>`; }
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
-let _chartRun = null, _chartRO = null, _lastTraceRunId = null, _chartAnim = null;
 
 // ---------- responsive shell: drawer / scrim / scroll-condense ----------
 function initShell() {
@@ -103,6 +103,48 @@ const FOCUS_PRESETS = [
 ];
 
 let reviewMethod = 'file';
+// 입력이 URL 인가(파일 업로드 탭이 아니고, 종류가 url 이거나 URL/경로 탭).
+function isUrlInput() {
+  const kind = document.getElementById('kind-select') ? document.getElementById('kind-select').value : 'auto';
+  return reviewMethod === 'url' || kind === 'url';
+}
+// URL 전용 옵션은 URL 입력일 때만, "평가 관점"은 비-URL(문서/코드)일 때만 노출(URL 은 리뷰범위로 대체).
+function updateInputOptsVisibility() {
+  const isUrl = isUrlInput();
+  const urlBox = document.getElementById('url-opts');
+  if (urlBox) urlBox.classList.toggle('hidden', !isUrl);
+  const persp = document.getElementById('persp-wrap');
+  if (persp) persp.classList.toggle('hidden', isUrl);
+}
+
+// 입력 종류·초점으로 추천 평가관점 키 산출(빈값=일반 문서 기본). #8 suggestRubric 의 클라이언트 미러.
+function recommendPerspectiveKey() {
+  const kind = document.getElementById('kind-select') ? document.getElementById('kind-select').value : 'auto';
+  const fsel = document.getElementById('focus-select');
+  const focus = fsel && FOCUS_PRESETS[+fsel.value] ? String(FOCUS_PRESETS[+fsel.value].value).toLowerCase() : '';
+  if (kind === 'code') return '코드';
+  if (/이력서|자기소개|자소서|resume|cv/.test(focus)) return '이력서';
+  if (/마케팅|카피|광고|홍보|seo|market/.test(focus)) return '마케팅';
+  return ''; // 일반 문서 → 내장 기본 루브릭(rubric off)
+}
+
+// "평가 관점" 선택을 실제 rubric 패널에 반영. URL 은 리뷰범위가 담당하므로 건드리지 않음.
+function applyPerspective() {
+  const sel = document.getElementById('persp-select');
+  const on = document.getElementById('rubric-on');
+  const box = document.getElementById('rubric-box');
+  if (!sel || !on || !box) return;
+  if (isUrlInput()) return; // URL 은 urlMode 로 채점 차원 전환
+  let key = sel.value;
+  if (key === 'custom') { on.checked = true; box.classList.remove('hidden'); return; }
+  if (key === 'auto') key = recommendPerspectiveKey();
+  if (!key) { on.checked = false; box.classList.add('hidden'); return; } // 일반 문서 → 내장 기본
+  on.checked = true;
+  box.classList.remove('hidden');
+  const tsel = document.getElementById('rubric-template');
+  if (tsel) tsel.value = key;
+  loadRubricTemplate(key);
+}
 let selectedFile = null;
 
 // ── 맞춤 평가 기준(rubric) 템플릿 + 편집기 ──
@@ -179,8 +221,18 @@ function initForm() {
       document.querySelectorAll('.seg-btn').forEach((x) => x.classList.toggle('active', x === b));
       $('#drop').classList.toggle('hidden', reviewMethod !== 'file');
       $('#url-input').classList.toggle('hidden', reviewMethod !== 'url');
+      updateInputOptsVisibility();
+      applyPerspective();
     };
   });
+  // 종류·초점이 바뀌면 옵션 노출 갱신 + (자동 추천이면) 평가 관점 재반영
+  if ($('#kind-select')) $('#kind-select').addEventListener('change', () => { updateInputOptsVisibility(); applyPerspective(); });
+  if ($('#focus-select')) $('#focus-select').addEventListener('change', () => { const p = $('#persp-select'); if (p && p.value === 'auto') applyPerspective(); });
+  if ($('#persp-select')) $('#persp-select').addEventListener('change', applyPerspective);
+  // 사용자가 rubric 템플릿을 직접 고르면 "직접 설정"으로 표시(자동 반영과 충돌 방지)
+  if ($('#rubric-template')) $('#rubric-template').addEventListener('change', () => { const p = $('#persp-select'); if (p) p.value = 'custom'; });
+  updateInputOptsVisibility();
+  applyPerspective();
 
   const drop = $('#drop');
   const fileInput = $('#file-input');
@@ -208,58 +260,107 @@ function initForm() {
   $('#start-btn').onclick = submitReview;
   $('#notify-btn').onclick = enableNotifications;
   initRubric();
-  initProvider();
+  initBackend();
 }
 
 // provider 선택 토글 + API 키 저장/상태
-async function initProvider() {
+const KEY_PROVIDERS = ['anthropic', 'openai', 'gemini', 'together', 'nemotron'];
+const KEY_PH = { anthropic: 'sk-ant-…', openai: 'sk-…', gemini: 'AIza…', together: '…', nemotron: 'nvapi-…' };
+const PROVIDER_NAMES = { '': 'Claude Code 구독', anthropic: 'Anthropic API', openai: 'OpenAI', gemini: 'Google Gemini', together: 'Together AI', nemotron: 'NVIDIA Nemotron' };
+
+function initBackend() {
+  const overlay = $('#backend-overlay');
+  const sel = $('#provider-select');
+  if (!overlay || !sel) return;
+  const open = () => { overlay.hidden = false; loadKeyStatus(); };
+  const close = () => { overlay.hidden = true; };
+  if ($('#backend-btn')) $('#backend-btn').onclick = open;
+  if ($('#backend-close')) $('#backend-close').onclick = close;
+  if ($('#backend-done')) $('#backend-done').onclick = close;
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !overlay.hidden) close(); });
+
+  // provider 라디오 → 숨은 select(기존 로직 호환)
+  document.querySelectorAll('input[name="provider"]').forEach((r) => {
+    r.onchange = () => { if (r.checked) { sel.value = r.value; applyBackendState(); } };
+  });
+  sel.addEventListener('change', applyBackendState);
+  if ($('#model-select')) $('#model-select').addEventListener('change', updateBackendLabel);
+  if ($('#provider-model')) $('#provider-model').addEventListener('input', updateBackendLabel);
+
+  if ($('#keys-save')) $('#keys-save').onclick = saveKeys;
+  if ($('#keys-clear-all')) $('#keys-clear-all').onclick = () => clearKey('all');
+  document.querySelectorAll('.key-clear[data-clear]').forEach((b) => { b.onclick = () => clearKey(b.dataset.clear); });
+
+  applyBackendState();
+  loadKeyStatus();
+}
+
+// 숨은 provider-select 값을 기준으로 라디오·모델칸·버튼 라벨을 동기화.
+function applyBackendState() {
   const sel = $('#provider-select');
   if (!sel) return;
-  const sync = () => {
-    const api = !!sel.value;
-    if ($('#cli-model-wrap')) $('#cli-model-wrap').classList.toggle('hidden', api);
-    if ($('#provider-model-wrap')) $('#provider-model-wrap').classList.toggle('hidden', !api);
-    if (api && $('#keys-adv')) $('#keys-adv').open = true;
-  };
-  sel.onchange = sync;
-  sync();
-  // 어떤 키가 저장돼 있는지 표시(값은 안 받음)
+  const api = !!sel.value;
+  document.querySelectorAll('input[name="provider"]').forEach((r) => { r.checked = r.value === sel.value; });
+  if ($('#cli-model-wrap')) $('#cli-model-wrap').classList.toggle('hidden', api);
+  if ($('#provider-model-wrap')) $('#provider-model-wrap').classList.toggle('hidden', !api);
+  updateBackendLabel();
+}
+
+function updateBackendLabel() {
+  const btn = $('#backend-btn');
+  const sel = $('#provider-select');
+  if (!btn || !sel) return;
+  const p = sel.value;
+  let label = PROVIDER_NAMES[p] || PROVIDER_NAMES[''];
+  if (!p) {
+    const m = $('#model-select') ? $('#model-select').value : '';
+    label += ' · ' + (m || '자동 모델');
+  } else {
+    const pm = $('#provider-model') ? $('#provider-model').value.trim() : '';
+    label += pm ? ' · ' + pm : ' · 기본 모델';
+  }
+  btn.textContent = label + ' ▾';
+}
+
+async function loadKeyStatus() {
   try {
     const st = await fetchJson('/api/keys');
-    for (const p of ['anthropic', 'openai', 'gemini']) {
+    for (const p of KEY_PROVIDERS) {
       const el = $('#key-' + p);
-      if (el && st[p]) el.placeholder = '저장됨 — 다시 입력하면 교체';
+      if (el) el.placeholder = st[p] ? '저장됨 — 다시 입력하면 교체' : KEY_PH[p];
     }
   } catch {}
-  const save = $('#keys-save');
-  if (save)
-    save.onclick = async () => {
-      const msg = $('#keys-msg');
-      const body = {};
-      for (const p of ['anthropic', 'openai', 'gemini']) {
-        const v = $('#key-' + p).value;
-        if (v) body[p] = v;
-      }
-      if (!Object.keys(body).length) {
-        msg.className = 'nr-msg err';
-        msg.textContent = '입력된 키가 없어요.';
-        return;
-      }
-      try {
-        const r = await fetch('/api/keys', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
-        const st = await r.json();
-        for (const p of ['anthropic', 'openai', 'gemini']) {
-          const el = $('#key-' + p);
-          el.value = '';
-          if (st[p]) el.placeholder = '저장됨 — 다시 입력하면 교체';
-        }
-        msg.className = 'nr-msg ok';
-        msg.textContent = '✓ 저장됨 (이 PC에만)';
-      } catch (e) {
-        msg.className = 'nr-msg err';
-        msg.textContent = '저장 실패: ' + e.message;
-      }
-    };
+}
+
+async function saveKeys() {
+  const msg = $('#keys-msg');
+  const body = {};
+  for (const p of KEY_PROVIDERS) { const v = $('#key-' + p).value; if (v) body[p] = v; }
+  if (!Object.keys(body).length) { msg.className = 'nr-msg err'; msg.textContent = '입력된 키가 없어요.'; return; }
+  try {
+    await fetch('/api/keys', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    for (const p of KEY_PROVIDERS) $('#key-' + p).value = '';
+    await loadKeyStatus();
+    msg.className = 'nr-msg ok'; msg.textContent = '✓ 저장됨 (이 PC에만)';
+  } catch (e) {
+    msg.className = 'nr-msg err'; msg.textContent = '저장 실패: ' + e.message;
+  }
+}
+
+async function clearKey(provider) {
+  const msg = $('#keys-msg');
+  const label = provider === 'all' ? '전체' : (PROVIDER_NAMES[provider] || provider);
+  if (!confirm(`${label} API 키를 초기화할까요?`)) return;
+  try {
+    await fetch('/api/keys?provider=' + encodeURIComponent(provider), { method: 'DELETE' });
+    if (provider === 'all') { for (const p of KEY_PROVIDERS) $('#key-' + p).value = ''; }
+    else if ($('#key-' + provider)) $('#key-' + provider).value = '';
+    await loadKeyStatus();
+    msg.className = 'nr-msg ok'; msg.textContent = '✓ 초기화됨';
+  } catch (e) {
+    msg.className = 'nr-msg err'; msg.textContent = '초기화 실패: ' + e.message;
+  }
 }
 
 function setFile(f) {
@@ -284,6 +385,10 @@ async function submitReview() {
   }
   fd.append('focus', FOCUS_PRESETS[parseInt($('#focus-select').value, 10)].value);
   fd.append('kind', $('#kind-select').value);
+  if ($('#urlmode-select')) fd.append('urlMode', $('#urlmode-select').value);
+  if ($('#urlrender-select')) fd.append('urlRender', $('#urlrender-select').value);
+  if ($('#urlcrawl-input') && $('#urlcrawl-input').value) fd.append('urlCrawl', $('#urlcrawl-input').value);
+  if ($('#urlchecklinks-on') && $('#urlchecklinks-on').checked) fd.append('urlCheckLinks', 'true');
   if ($('#maxiter-input').value) fd.append('maxIter', $('#maxiter-input').value);
   if ($('#recur-input').value) fd.append('recurWindow', $('#recur-input').value);
   if ($('#maxcost-input').value) fd.append('maxCostPerIterUsd', $('#maxcost-input').value);
@@ -306,6 +411,8 @@ async function submitReview() {
     if ($('#verify-on') && !$('#verify-on').checked) fd.append('verifyFindings', 'false');
   }
   if ($('#emit-on') && $('#emit-on').checked) fd.append('emitChanges', 'true');
+  if ($('#autoresume-on') && $('#autoresume-on').checked) fd.append('autoResume', 'true');
+  saveFormPrefs(); // #3: 마지막 설정 기억
 
   // A/B 비교 모드면 변형 설정을 붙이고 /api/compare 로
   let endpoint = '/api/runs';
@@ -349,6 +456,35 @@ async function submitReview() {
   }
 }
 
+// #3: 고급 옵션을 localStorage 에 저장/복원(마지막 설정 기억). 스테일 값 혼란 방지.
+const PREF_KEY = 'autodr.formprefs';
+function saveFormPrefs() {
+  try {
+    const p = {};
+    ['focus-select', 'kind-select', 'urlmode-select', 'urlrender-select', 'urlcrawl-input', 'maxiter-input', 'recur-input', 'maxcost-input', 'maxtotalcost-input', 'maxattempts-input', 'provider-select', 'model-select', 'persp-select'].forEach((id) => {
+      const el = $('#' + id);
+      if (el) p[id] = el.value;
+    });
+    ['panel-on', 'verify-on', 'emit-on', 'autoresume-on', 'urlchecklinks-on'].forEach((id) => {
+      const el = $('#' + id);
+      if (el) p[id] = el.checked;
+    });
+    localStorage.setItem(PREF_KEY, JSON.stringify(p));
+  } catch {}
+}
+function restoreFormPrefs() {
+  try {
+    const p = JSON.parse(localStorage.getItem(PREF_KEY) || '{}');
+    Object.entries(p).forEach(([id, v]) => {
+      const el = $('#' + id);
+      if (!el) return;
+      if (typeof v === 'boolean') el.checked = v;
+      else el.value = v;
+      el.dispatchEvent(new Event('change')); // 의존 UI(검증·모델칸 표시 등) 갱신
+    });
+  } catch {}
+}
+
 // ---------- 런 제어 (일시정지 / 재개 / 중단) ----------
 async function controlRun(id, action) {
   try {
@@ -362,6 +498,48 @@ async function controlRun(id, action) {
   } catch (e) {
     toast('err', '제어 실패', e.message);
   }
+}
+
+// 이어하기: 종료된 런의 베스트 + 열린 지적을 시드로 새 런을 시작.
+async function continueRun(id) {
+  try {
+    const r = await fetch(`/api/runs/${id}/continue`, { method: 'POST' });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || '실패');
+    toast('ok', '이어하기 시작', `베스트에서 이어서 다듬어요 (열린 지적 ${j.seeded}건 이어받음).`);
+    setTimeout(loadRuns, 500);
+  } catch (e) {
+    toast('err', '이어하기 실패', e.message);
+  }
+}
+
+// U7: 처음부터 다시 실행(원본 입력으로 새 런 시작 — 베스트 없어도 동작).
+async function rerunRun(id) {
+  try {
+    const r = await fetch(`/api/runs/${id}/rerun`, { method: 'POST' });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || '실패');
+    toast('ok', '다시 실행', '원본 입력으로 새 리뷰를 시작했어요.');
+    setTimeout(loadRuns, 500);
+  } catch (e) {
+    toast('err', '다시 실행 실패', e.message);
+  }
+}
+
+// U7: 실패 메시지를 사람 친화적으로 풀이(무엇이/왜).
+function explainError(msg) {
+  const m = String(msg || '');
+  if (/504|gateway|게이트웨이/i.test(m))
+    return { what: '서버가 일시적으로 응답하지 못했어요 (504).', why: 'NVIDIA 서버가 잠깐 붐볐을 때 생겨요. 보통 다시 실행하면 정상 처리됩니다.' };
+  if (/JSON.*(추출|파싱).*실패|extract.*json/i.test(m))
+    return { what: '모델 응답을 해석하지 못했어요.', why: '큰 문서를 한 번에 다루다 응답 형식이 잠깐 깨진 거예요. 다시 실행하면 대개 정상 처리됩니다.' };
+  if (/잘렸|토큰 한도|truncat|length/i.test(m))
+    return { what: '응답이 너무 길어 잘렸어요.', why: '입력이 매우 큰 경우예요. 입력을 나누거나 다시 시도해 보세요.' };
+  if (/aborted|타임아웃|timeout|시간 초과/i.test(m))
+    return { what: '응답이 너무 오래 걸려 중단됐어요.', why: '모델이 느릴 때 생겨요. 다시 실행하거나 더 빠른 설정(렌즈 경량 등)을 써보세요.' };
+  if (/API 키|api key|키가 없/i.test(m))
+    return { what: 'API 키 문제예요.', why: '설정에서 해당 provider 키가 등록돼 있는지 확인해 주세요.' };
+  return { what: '예기치 못한 문제로 멈췄어요.', why: '아래 원본 메시지를 확인하거나 다시 실행해 보세요.' };
 }
 
 // ---------- 알림 ----------
@@ -432,13 +610,23 @@ async function fetchJson(url) {
   if (!r.ok) throw new Error(r.status);
   return r.json();
 }
+// U5: 회차 산출물·원본은 한 번 쓰이면 불변이라 탭 전환 때마다 재fetch 하지 않고 캐시한다.
+const _textCache = new Map();
+const _isImmutable = (url) => /\/iterations\/\d+\/(review|artifact)\b/.test(url) || /\/input(\?|$)/.test(url);
 async function fetchText(url) {
+  if (_isImmutable(url) && _textCache.has(url)) return _textCache.get(url);
   const r = await fetch(url);
   if (!r.ok) return '';
-  return r.text();
+  const t = await r.text();
+  if (_isImmutable(url)) {
+    if (_textCache.size > 60) _textCache.clear(); // 메모리 상한(런 전환 누적 방지)
+    _textCache.set(url, t);
+  }
+  return t;
 }
 
-async function loadRuns() {
+// changedIds: U1 — SSE 가 알려준 "이번에 바뀐 런 id" 목록. null 이면(최초 로드/알 수 없음) 전체 갱신.
+async function loadRuns(changedIds) {
   try {
     runs = await fetchJson('/api/runs');
   } catch {
@@ -447,12 +635,17 @@ async function loadRuns() {
   checkAlerts();
   updateLiveChip();
   // 선택된 분석이 없으면 URL 해시(#run=id) 또는 가장 최근 분석을 자동 선택 — 열자마자 내용이 보이도록
+  const hadSelection = !!selectedId;
   if (!selectedId && runs.length) {
     const fromHash = decodeURIComponent((location.hash.match(/run=([^&]+)/) || [])[1] || '');
     selectedId = fromHash && runs.some((r) => r.id === fromHash) ? fromHash : runs[0].id;
   }
-  renderSidebar();
-  if (selectedId) await renderDetail(selectedId);
+  renderSidebar(); // 사이드바(목록)는 항상 가볍게 갱신
+  if (!selectedId) return;
+  // U1: 보고 있는 런이 이번 변경 대상이 아니면 상세는 다시 그리지 않는다(읽던 화면 보존 + 깜빡임 제거).
+  const affectsSelected =
+    changedIds == null || !hadSelection || changedIds.length === 0 || changedIds.includes(selectedId);
+  if (affectsSelected) await renderDetail(selectedId);
 }
 
 // 탑바의 "분석 중 n건" 라이브 칩
@@ -475,6 +668,7 @@ const STATUS_LABEL = {
   stopped_declined: '하락으로 중단',
   stopped_cap: '반복 상한 도달',
   stopped_cost: '비용 상한 도달',
+  stopped_ratelimit: '사용 한도 도달',
   completed: '완료',
   error: '오류',
 };
@@ -508,21 +702,6 @@ function scoreColor(v) {
   if (v >= 65) return 'var(--brand)';
   if (v >= 45) return 'var(--warn)';
   return 'var(--bad)';
-}
-// 사이드바 타깃 카드용 미니 신호 스파크라인(최근 점수 추이)
-function sparkline(scores) {
-  const pts = (scores || []).map((s) => s.score).slice(-12);
-  const W = 56, H = 18, pad = 2;
-  if (!pts.length) return `<svg class="tgt-spark" viewBox="0 0 ${W} ${H}" aria-hidden="true"></svg>`;
-  const n = pts.length;
-  const x = (i) => (n === 1 ? W / 2 : pad + (i / (n - 1)) * (W - 2 * pad));
-  const y = (v) => pad + (1 - v / 100) * (H - 2 * pad);
-  const d = pts.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(' ');
-  const lx = x(n - 1).toFixed(1), ly = y(pts[n - 1]).toFixed(1);
-  return `<svg class="tgt-spark" viewBox="0 0 ${W} ${H}" aria-hidden="true">
-    <path d="${d}" fill="none" stroke="var(--signal)" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
-    <circle cx="${lx}" cy="${ly}" r="1.9" fill="var(--lock)"/>
-  </svg>`;
 }
 // 베스트가 "잠긴"(수렴/완료) 상태인지
 function isLocked(run) {
@@ -562,8 +741,8 @@ function tokenCardHtml(run) {
   const total = tokTotal(t);
   const cell = (label, val, hint, cls = '') =>
     `<div class="tok-cell ${cls}"><span class="tok-label">${label}</span><span class="tok-val">${fmtTok(val)}</span>${hint ? `<span class="tok-hint">${hint}</span>` : ''}</div>`;
-  return `<div class="card">
-    <h2>${icon('coin')} 토큰 사용 <span class="right">${run.totalCostUsd ? `$${run.totalCostUsd.toFixed(4)}` : '$0'}</span></h2>
+  return `<details class="card collapsible">
+    <summary>${icon('coin')} 토큰 사용 <span class="right">${run.totalCostUsd ? `$${run.totalCostUsd.toFixed(4)}` : '$0'}</span></summary>
     <div class="tok-grid">
       ${cell('입력', t.input, '1× 단가')}
       ${cell('출력', t.output, '5× 단가')}
@@ -572,8 +751,109 @@ function tokenCardHtml(run) {
       ${cell('합계', total, '', 'total')}
     </div>
     <div class="tok-note">회차마다 Claude Code 에이전트 기본 컨텍스트(캐시 ~23K 토큰)가 매번 실려요. 회차·다각도(panel)·A/B가 늘수록 토큰이 곱으로 증가합니다.</div>
+  </details>`;
+}
+// #4: 비용 게이지 — 누적 비용 vs 상한(임계선). 멈춘 이유를 한눈에.
+function costGaugeHtml(run) {
+  const cap = run.config && run.config.maxTotalCostUsd;
+  const spent = run.totalCostUsd || 0;
+  if (!cap || cap <= 0) {
+    return `<div class="cost-gauge"><div class="cg-head"><span class="cg-label">${icon('coin')} 비용</span><span><strong>$${spent.toFixed(4)}</strong> · 상한 없음</span></div></div>`;
+  }
+  const pct = Math.min(100, Math.round((spent / cap) * 100));
+  const lvl = pct >= 90 ? 'crit' : pct >= 75 ? 'warn' : '';
+  return `<div class="cost-gauge ${lvl}">
+    <div class="cg-head"><span class="cg-label">${icon('coin')} 비용</span><span>$${spent.toFixed(4)} / $${cap} (${pct}%)</span></div>
+    <div class="cg-bar"><div class="cg-fill" style="width:${pct}%"></div></div>
   </div>`;
 }
+
+// U3: 회차별 단계 간트. 각 회차를 리뷰→검증→개선→채점 누적 막대로(폭=소요시간 비례).
+const STAGE_COLORS = { '리뷰': '#5B8DEF', '검증': '#E8A13A', '개선': 'var(--brand)', '채점': '#16A97C' };
+function fmtSec(ms) {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return s + '초';
+  return Math.floor(s / 60) + '분 ' + (s % 60) + '초';
+}
+function stageGanttHtml(run) {
+  const its = (run.iterations || []).filter((i) => i.stages && i.stages.length);
+  if (!its.length) return '';
+  // 가장 긴 회차 총합을 기준으로 막대 전체 폭을 맞춰(회차 간 길이 비교 가능).
+  const totals = its.map((i) => i.stages.reduce((s, st) => s + (st.ms || 0), 0));
+  const maxTotal = Math.max(...totals, 1);
+  const names = [...new Set(its.flatMap((i) => i.stages.map((s) => s.name)))];
+  const legend = names
+    .map((n) => `<span class="gantt-leg"><i style="background:${STAGE_COLORS[n] || '#999'}"></i>${n}</span>`)
+    .join('');
+  const rows = its
+    .map((it, idx) => {
+      const total = totals[idx];
+      const segs = it.stages
+        .map((st) => {
+          const pctOfBar = (st.ms / total) * 100;
+          return `<span class="gantt-seg" style="width:${pctOfBar}%;background:${STAGE_COLORS[st.name] || '#999'}" title="${st.name} · ${fmtSec(st.ms)}">${pctOfBar > 14 ? st.name : ''}</span>`;
+        })
+        .join('');
+      const barW = (total / maxTotal) * 100;
+      return `<div class="gantt-row">
+        <span class="gantt-lbl">${it.iteration}번째</span>
+        <span class="gantt-track"><span class="gantt-bar" style="width:${barW}%">${segs}</span></span>
+        <span class="gantt-total">${fmtSec(total)}</span>
+      </div>`;
+    })
+    .join('');
+  return `<div class="card">
+    <h2>${icon('bars')} 단계별 소요 <span class="right gantt-legend">${legend}</span></h2>
+    <div class="gantt">${rows}</div>
+  </div>`;
+}
+
+// #B: 인터랙티브 점수 추이 차트(SVG). 점=회차(채택 채움/폐기 링/베스트 강조), 호버 툴팁.
+function scoreChartHtml(run) {
+  const its = run.iterations || [];
+  if (!its.length) return '';
+  const W = 600, H = 168, padL = 30, padR = 16, padT = 16, padB = 26;
+  const n = its.length;
+  const x = (i) => (n === 1 ? padL + (W - padL - padR) / 2 : padL + (i / (n - 1)) * (W - padL - padR));
+  const y = (v) => padT + (1 - v / 100) * (H - padT - padB);
+  const grid = [0, 50, 100]
+    .map((v) => `<line class="sc-grid" x1="${padL}" y1="${y(v).toFixed(1)}" x2="${W - padR}" y2="${y(v).toFixed(1)}"/><text class="sc-axis" x="${padL - 6}" y="${(y(v) + 3).toFixed(1)}" text-anchor="end">${v}</text>`)
+    .join('');
+  const pass = run.config && run.config.rubric && run.config.rubric.passThreshold;
+  const passLine = pass != null ? `<line class="sc-pass" x1="${padL}" y1="${y(pass).toFixed(1)}" x2="${W - padR}" y2="${y(pass).toFixed(1)}"/><text class="sc-passlbl" x="${W - padR}" y="${(y(pass) - 4).toFixed(1)}" text-anchor="end">합격 ${pass}</text>` : '';
+  const linePts = its.map((it, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)} ${y(it.score).toFixed(1)}`).join(' ');
+  const line = n > 1 ? `<path class="sc-line" d="${linePts}" />` : '';
+  const dots = its
+    .map((it, i) => {
+      const best = it.iteration === run.bestIteration;
+      const cls = best ? 'pt-best' : it.kept ? 'pt-kept' : 'pt-drop';
+      const tip = `#${it.iteration} · ${it.score}점 · ${best ? '베스트' : it.kept ? '채택' : '폐기'}${it.model ? ' · ' + prettyModel(it.model) : ''}`;
+      return `<circle class="sc-pt ${cls}" cx="${x(i).toFixed(1)}" cy="${y(it.score).toFixed(1)}" r="${best ? 5.5 : 4}" data-tip="${escapeHtml(tip)}"/><text class="sc-val" x="${x(i).toFixed(1)}" y="${(y(it.score) - 9).toFixed(1)}" text-anchor="middle">${it.score}</text>`;
+    })
+    .join('');
+  const xlabels = its.map((it, i) => `<text class="sc-axis" x="${x(i).toFixed(1)}" y="${H - 8}" text-anchor="middle">${it.iteration}</text>`).join('');
+  return `<div class="scorechart"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="회차별 점수 추이">
+    ${grid}${passLine}${line}${dots}${xlabels}
+  </svg><div class="sc-tip" hidden></div></div>`;
+}
+// 차트 점 호버 → 툴팁
+function attachChartHover(root) {
+  const wrap = (root || document).querySelector('.scorechart');
+  if (!wrap) return;
+  const tip = wrap.querySelector('.sc-tip');
+  wrap.querySelectorAll('.sc-pt').forEach((pt) => {
+    pt.addEventListener('mouseenter', () => {
+      tip.textContent = pt.dataset.tip;
+      tip.hidden = false;
+      const wr = wrap.getBoundingClientRect();
+      const pr = pt.getBoundingClientRect();
+      tip.style.left = Math.round(pr.left - wr.left + pr.width / 2) + 'px';
+      tip.style.top = Math.round(pr.top - wr.top - 8) + 'px';
+    });
+    pt.addEventListener('mouseleave', () => { tip.hidden = true; });
+  });
+}
+
 // 초안 스텝퍼 — 각 패스를 노드로(채택=민트, 베스트=보라)
 function stepperHtml(run) {
   const its = run.iterations || [];
@@ -585,11 +865,16 @@ function stepperHtml(run) {
   return `<div class="stepper">${nodes.join('<div class="step-link"></div>')}</div>`;
 }
 
+let runQuery = ''; // #14: 사이드바 검색어
 function renderSidebar() {
-  $('#run-count').textContent = runs.length;
   const ul = $('#run-list');
   ul.innerHTML = '';
-  for (const r of runs) {
+  // #14: 제목·상태로 필터
+  const shown = runQuery
+    ? runs.filter((r) => (r.title || '').toLowerCase().includes(runQuery) || statusLabel(r.status).toLowerCase().includes(runQuery))
+    : runs;
+  $('#run-count').textContent = runQuery ? `${shown.length}/${runs.length}` : runs.length;
+  for (const r of shown) {
     const li = document.createElement('li');
     if (r.id === selectedId) li.classList.add('active');
     const live = r.status === 'running' || r.status === 'pending';
@@ -602,7 +887,8 @@ function renderSidebar() {
       <div class="an-body">
         <div class="an-title">${r.compare ? `<span class="vbadge">${r.compare.variant}</span> ` : ''}${escapeHtml(r.title)}</div>
         <div class="an-sub ${live ? 'live' : ''}">${escapeHtml(sub)}</div>
-      </div>`;
+      </div>
+      <button class="an-del" title="이 분석 삭제" aria-label="삭제">×</button>`;
     li.onclick = () => {
       selectedId = r.id;
       selectedIter = null;
@@ -611,20 +897,112 @@ function renderSidebar() {
       renderDetail(r.id);
       if (window.__closeDrawerIfMobile) window.__closeDrawerIfMobile();
     };
+    const del = li.querySelector('.an-del');
+    if (del) del.onclick = (ev) => { ev.stopPropagation(); deleteRun(r.id, r.title); };
     ul.appendChild(li);
   }
 }
 
+// #14: 런 삭제(확인 후). 진행 중이면 막는다.
+async function deleteRun(id, title) {
+  const run = runs.find((r) => r.id === id);
+  if (run && (run.status === 'running' || run.status === 'pending')) {
+    toast('warn', '삭제 불가', '진행 중인 분석은 먼저 중단하세요.');
+    return;
+  }
+  if (!confirm(`"${title}" 분석 기록을 삭제할까요? (산출물 폴더가 지워집니다)`)) return;
+  try {
+    const r = await fetch('/api/runs/' + id, { method: 'DELETE' });
+    if (!r.ok) throw new Error((await r.json()).error || '실패');
+    if (selectedId === id) { selectedId = null; $('#detail').innerHTML = ''; }
+    toast('ok', '삭제됨', '분석 기록을 지웠어요.');
+    loadRuns();
+  } catch (e) {
+    toast('err', '삭제 실패', e.message);
+  }
+}
+
+let _renderedDetailId = null; // U1: 같은 런을 다시 그릴 때만 스크롤 위치를 보존
 async function renderDetail(id) {
+  const detailEl = $('#detail');
+  const samePane = _renderedDetailId === id;
+  const prevScroll = samePane && detailEl ? detailEl.scrollTop : 0;
   let run;
   try {
     run = await fetchJson('/api/runs/' + id);
   } catch {
-    $('#detail').innerHTML = '<div class="empty">런을 불러올 수 없습니다.</div>';
+    detailEl.innerHTML = '<div class="empty">런을 불러올 수 없습니다.</div>';
+    _renderedDetailId = null;
     return;
   }
-  if (run.compare) { renderCompare(run); return; }
+  if (run.compare) { renderCompare(run); _renderedDetailId = id; return; }
   await renderNormalDetail(run, '#detail');
+  _renderedDetailId = id;
+  // 같은 런의 라이브 갱신이면 읽던 스크롤 위치를 복원(매 SSE 틱마다 맨 위로 튀는 것 방지).
+  if (samePane && detailEl) detailEl.scrollTop = prevScroll;
+}
+
+// ── 라이브 진행 표시(경과 시간·회차 ETA·단계) ──
+let _liveTicker = null;
+const _roundStarts = {}; // { runId: { iter, ts } } — 회차 시작 시각(클라이언트 추정)
+
+// 회차당 평균 소요(ms). 완료된 회차가 있으면 실측 평균, 없으면 provider 로 추정.
+function avgIterMs(run) {
+  const its = (run.iterations || []).filter((i) => i.durationMs);
+  if (its.length) return its.reduce((s, i) => s + i.durationMs, 0) / its.length;
+  return run.config && run.config.provider === 'nemotron' ? 6 * 60_000 : 60_000;
+}
+
+// 최근 로그로 현재 단계 추정: 0 리뷰 · 1 개선 · 2 채점
+function detectStage(run) {
+  const last = (run.log || []).filter((l) => l.level !== 'error').slice(-1)[0];
+  const m = last ? last.msg : '';
+  if (/채점/.test(m)) return 2;
+  if (/리뷰|탐색|검토|검증|찾는|지적/.test(m)) return 0;
+  if (/다듬|개선|적용|마무리|edit/i.test(m)) return 1;
+  return 0;
+}
+
+// ms → "1:23" (분:초)
+function fmtClock(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(s / 60);
+  return `${m}:${String(s % 60).padStart(2, '0')}`;
+}
+// ms → "약 6분" / "약 45초" (대략)
+function fmtAbout(ms) {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}초`;
+  const m = Math.round(s / 60);
+  return `${m}분`;
+}
+
+function stopLiveTicker() {
+  if (_liveTicker) { clearInterval(_liveTicker); _liveTicker = null; }
+}
+
+// 1초마다 경과/ETA/회차 진행바를 갱신(서버 이벤트 없이도 살아 움직이게).
+function setupLiveTicker(run, avg) {
+  stopLiveTicker();
+  const rs = _roundStarts[run.id];
+  if (!rs || rs.iter !== run.currentIteration) {
+    _roundStarts[run.id] = { iter: run.currentIteration, ts: Date.now() };
+  }
+  const createdMs = new Date(run.createdAt).getTime();
+  const tick = () => {
+    const elapsedEl = document.getElementById('live-elapsed');
+    if (!elapsedEl) return stopLiveTicker(); // 화면을 벗어남
+    const now = Date.now();
+    elapsedEl.textContent = fmtClock(now - createdMs);
+    const roundElapsed = now - _roundStarts[run.id].ts;
+    const remain = avg - roundElapsed;
+    const etaEl = document.getElementById('live-eta');
+    if (etaEl) etaEl.textContent = remain > 4000 ? `이번 회차 약 ${fmtAbout(remain)} 남음` : '이번 회차 곧 마무리…';
+    const pb = document.getElementById('round-prog');
+    if (pb) pb.style.width = `${Math.min(100, (roundElapsed / avg) * 100).toFixed(1)}%`;
+  };
+  tick();
+  _liveTicker = setInterval(tick, 1000);
 }
 
 // 일반(단일 런) 상세 본문 — 비교 뷰에서는 하위 컨테이너(mountSel)에 변형별로 렌더한다.
@@ -648,10 +1026,17 @@ async function renderNormalDetail(run, mountSel) {
     (canPause ? `<button class="ctl-btn pause" data-act="pause">${icon('pause')} 일시정지</button>` : '') +
     (canResume ? `<button class="ctl-btn resume" data-act="resume">${icon('play')} 재개</button>` : '') +
     (canStop ? `<button class="ctl-btn stop" data-act="stop" title="진행 중인 호출을 즉시 종료해 토큰 낭비를 막아요">${icon('stop')} 바로 그만두기</button>` : '') +
-    (!working && !paused && run.input.origFormat ? `<a class="ctl-btn" href="/api/runs/${id}/best/office">${icon('download')} .${run.input.origFormat} 받기</a>` : '');
+    (!working && !paused && run.bestIteration != null ? `<button class="ctl-btn resume" data-continue="1" title="베스트 결과에서 이어서 더 다듬어요 (열린 지적을 이어받음)">${icon('play')} 이어하기</button>` : '') +
+    (!working && !paused && run.input.origFormat ? `<a class="ctl-btn" href="/api/runs/${id}/best/office">${icon('download')} ${run.officeInPlace ? '원본 양식' : ''}.${run.input.origFormat} 받기</a>` : '');
 
+  // #11: 현재 단계 = 가장 최근 로그(에러 제외). panel 길이로 인한 "멈춘 줄" 오해 감소.
+  const lastStep = (run.log || []).filter((l) => l.level !== 'error').slice(-1)[0];
+  const stageIdx = detectStage(run); // 0 리뷰 · 1 개선 · 2 채점
+  const avgMs = avgIterMs(run);
   let hero;
   if (working) {
+    const stage = (i, label) =>
+      `<div class="stage ${stageIdx > i ? 'done' : ''} ${stageIdx === i ? 'active' : ''}"><span class="stage-dot"></span>${label}</div>`;
     hero = `
       <section class="hero working">
         <div class="hero-controls">${controls}</div>
@@ -663,7 +1048,20 @@ async function renderNormalDetail(run, mountSel) {
             <span class="model-pill">${icon('wand')} ${escapeHtml(model)}</span>
             ${run.bestScore != null ? `<span>지금 가장 좋은 점수 <strong>${run.bestScore}</strong>점</span>` : '<span class="muted">첫 점수를 매기는 중…</span>'}
           </div>
-          <div class="live-bar" aria-hidden="true"></div>
+          <div class="stage-track">${stage(0, '리뷰')}<span class="stage-arr"></span>${stage(1, '개선')}<span class="stage-arr"></span>${stage(2, '채점')}</div>
+          <div class="round-bar" aria-hidden="true"><i id="round-prog"></i></div>
+          <div class="live-timer">
+            <span class="lt-item">⏱ 경과 <b id="live-elapsed">0:00</b></span>
+            <span class="lt-sep">·</span>
+            <span class="lt-item" id="live-eta">예상 계산 중…</span>
+            <span class="lt-sep">·</span>
+            <span class="lt-item muted">회차당 평균 ${fmtAbout(avgMs)}</span>
+          </div>
+          <div class="live-stream-wrap">
+            <div class="live-stream-head">✍️ 실시간 생성 <span class="ls-cursor" aria-hidden="true"></span></div>
+            <pre class="live-stream" id="live-stream"><span class="muted">모델 응답을 기다리는 중…</span></pre>
+          </div>
+          ${lastStep ? `<div class="hero-step">▸ ${escapeHtml(lastStep.msg)}</div>` : ''}
         </div>
       </section>`;
   } else if (paused) {
@@ -688,30 +1086,50 @@ async function renderNormalDetail(run, mountSel) {
         : run.bestIteration != null
           ? `가장 좋았던 건 ${run.bestIteration}번째 초안이에요`
           : '아직 다듬은 결과가 없어요';
+    const errInfo = isError ? explainError(run.message) : null;
     const sub = isError
-      ? escapeHtml(run.message || '진행 기록을 확인해 주세요.')
+      ? '아래에서 원인을 확인하고 다시 시도할 수 있어요.'
       : delta != null && delta > 0
         ? `<span class="is-ok">+${delta}점 좋아졌어요</span> · 총 ${run.currentIteration}번 다듬음`
         : `총 ${run.currentIteration}번 다듬음`;
     hero = `
-      <section class="hero done">
+      <section class="hero done ${isError ? 'is-error' : ''}">
         <div class="hero-controls">${controls}</div>
         <div class="ring" style="--p:${run.bestScore ?? 0}" aria-hidden="true"><div class="ring-core">${run.bestScore ?? '—'}</div></div>
         <div class="hero-main">
           <div class="hero-line1">${headline}</div>
           <div class="hero-line2">${sub}</div>
+          ${isError ? `<div class="err-card">
+            <div class="err-what">⚠️ ${escapeHtml(errInfo.what)}</div>
+            <div class="err-why">${escapeHtml(errInfo.why)}</div>
+            <div class="err-actions">
+              <button class="btn-primary" data-rerun="1">${icon('play')} 처음부터 다시 실행</button>
+              ${run.bestIteration != null ? `<button class="ctl-btn resume" data-continue="1">${icon('play')} 베스트에서 이어하기</button>` : ''}
+              <a class="btnlink" href="/api/runs/${id}/log" target="_blank">자세한 로그 ↗</a>
+            </div>
+            <details class="err-raw"><summary class="muted">원본 메시지</summary><pre>${escapeHtml(run.message || '')}</pre></details>
+          </div>` : ''}
+          ${run.status === 'stopped_ratelimit' && run.resumeAt ? `<div class="hero-hint">⏳ Claude 사용 한도 — <strong>${new Date(run.resumeAt).toLocaleString()}</strong> 이후 ${run.config && run.config.autoResume ? '자동 이어하기 예약됨' : '"이어하기"로 계속'}</div>` : ''}
+          ${run.status === 'stopped_cost' ? `<div class="hero-hint">💰 비용 상한 도달 — "이어하기"로 계속하거나 상한을 올려 재실행하세요</div>` : ''}
           ${stepperHtml(run)}
-          ${run.bestScore != null ? `<a class="btn-primary" href="/api/runs/${id}/best" target="_blank">${icon('doc')} 개선본 보기</a>` : ''}
+          ${run.bestScore != null && !isError ? `<a class="btn-primary" href="/api/runs/${id}/best" target="_blank">${icon('doc')} 개선본 보기</a>` : ''}
         </div>
       </section>`;
   }
 
+  const its = run.iterations || [];
   $(mountSel).innerHTML = `
     <div class="detail-head"><h1>${escapeHtml(run.title)}</h1></div>
     <div class="detail-sub">${statusTag(run.status, true)} <span class="kind-tag">${run.input.kind}</span> ${escapeHtml(run.input.source)}</div>
 
     ${renderAlert(run)}
     ${hero}
+    ${costGaugeHtml(run)}
+    <div class="tele-strip">${telemetryStrip(run)}</div>
+
+    ${its.length ? `<div class="card"><h2>${icon('bars')} 점수 추이</h2>${scoreChartHtml(run)}</div>` : ''}
+
+    ${stageGanttHtml(run)}
 
     <div class="card">
       <h2>${icon('ledger')} 다듬은 항목 <span class="right" id="ledger-prog"></span></h2>
@@ -730,20 +1148,12 @@ async function renderNormalDetail(run, mountSel) {
     </div>
 
     <div class="card">
-      <h2>${icon('history')} 초안 기록</h2>
-      <table>
-        <thead><tr><th>초안</th><th>점수</th><th>채택</th><th>모델</th><th>소요</th><th>토큰</th><th>메모</th></tr></thead>
-        <tbody id="iter-rows"></tbody>
-      </table>
-    </div>
-
-    ${tokenCardHtml(run)}
-
-    <div class="card">
       <h2>${icon('doc')} 미리보기 — <span id="iter-sel">${selectedIter != null ? selectedIter + '번째' : '-'}</span>
         <span class="right">
           ${run.bestScore != null ? `<a class="btnlink" href="/api/runs/${id}/best" target="_blank">개선본 열기 ↗</a>` : ''}
-          ${run.input.origFormat ? `<a class="btnlink" href="/api/runs/${id}/best/office">${icon('download')} .${run.input.origFormat} 받기</a>` : ''}
+          ${run.input.kind === 'code' ? `<a class="btnlink" href="/api/runs/${id}/best/diff" target="_blank">${icon('download')} 패치(.diff)</a>` : ''}
+          ${run.input.origFormat ? `<a class="btnlink" href="/api/runs/${id}/best/office">${icon('download')} ${run.officeInPlace ? '원본 양식' : ''}.${run.input.origFormat}</a>` : ''}
+          ${run.officeInPlace ? `<a class="btnlink" href="/api/runs/${id}/best/office-clean">${icon('download')} 정리본 .${run.input.origFormat}</a>` : ''}
           ${run.changeLog && run.changeLog.length ? `<a class="btnlink" href="/api/runs/${id}/best/changes" target="_blank">변경 내역 ↗</a>${run.input.origFormat ? `<a class="btnlink" href="/api/runs/${id}/best/changes-office">${icon('download')} 변경요약 .${run.input.origFormat}</a>` : ''}` : ''}
         </span>
       </h2>
@@ -757,22 +1167,46 @@ async function renderNormalDetail(run, mountSel) {
       <div id="viewer" class="viewer"></div>
     </div>
 
-    <div class="card">
-      <h2>${icon('terminal')} 진행 기록</h2>
+    <details class="card collapsible" ${working ? 'open' : ''}>
+      <summary>${icon('history')} 초안 기록 <span class="muted">(${its.length}회)</span></summary>
+      <table>
+        <thead><tr><th>초안</th><th>점수</th><th>채택</th><th>모델</th><th>소요</th><th>토큰</th><th>메모</th></tr></thead>
+        <tbody id="iter-rows"></tbody>
+      </table>
+    </details>
+
+    ${tokenCardHtml(run)}
+
+    <details class="card collapsible" ${working ? 'open' : ''}>
+      <summary>${icon('terminal')} 진행 기록</summary>
+      <div class="log-tools"><a class="btnlink" href="/api/runs/${id}/log" target="_blank">전체 로그 ↗</a></div>
       <div id="log" class="log"></div>
-    </div>
+    </details>
   `;
 
   document.querySelectorAll('.hero-controls .ctl-btn[data-act]').forEach((b) => {
     b.onclick = () => controlRun(run.id, b.dataset.act);
   });
+  document.querySelectorAll('.hero-controls .ctl-btn[data-continue]').forEach((b) => {
+    b.onclick = () => continueRun(run.id);
+  });
+  // U7: 에러 카드의 다시 실행 / 이어하기 버튼
+  document.querySelectorAll('.err-card [data-rerun]').forEach((b) => {
+    b.onclick = () => rerunRun(run.id);
+  });
+  document.querySelectorAll('.err-card [data-continue]').forEach((b) => {
+    b.onclick = () => continueRun(run.id);
+  });
   bindAlertActions(run);
+  attachChartHover($(mountSel));
   renderDims(best);
   renderLedger(run);
   renderIssues(best, run);
   renderIterRows(run);
   renderLog(run);
   bindTabs(run);
+  if (working) setupLiveTicker(run, avgMs);
+  else stopLiveTicker();
   await renderViewer(run);
 }
 
@@ -947,13 +1381,16 @@ function bindAlertActions(run) {
   });
 }
 
+let ledgerSevFilter = 'all'; // #12: 심각도 필터(all/high/medium/low)
 function renderLedger(run) {
   const el = $('#ledger');
   const prog = $('#ledger-prog');
   if (!el) return;
   const findings = run.findings || [];
-  const open = findings.filter((f) => f.status === 'open');
-  const resolved = findings.filter((f) => f.status === 'resolved');
+  const sevOf = (f) => f.severity || 'medium';
+  const passSev = (f) => ledgerSevFilter === 'all' || sevOf(f) === ledgerSevFilter;
+  const open = findings.filter((f) => f.status === 'open' && passSev(f));
+  const resolved = findings.filter((f) => f.status === 'resolved' && passSev(f));
   const total = findings.length;
   const pct = total ? Math.round((resolved.length / total) * 100) : 0;
   if (prog) prog.innerHTML = total
@@ -968,7 +1405,7 @@ function renderLedger(run) {
   const openHtml = open.length
     ? open
         .map(
-          (f) => `<li class="lf open">
+          (f) => `<li class="lf open lf-click" data-fid="${f.id}" title="개선본에서 위치 보기">
             <span class="mark"></span><span class="lf-id">#${f.id}</span>${sev(f.severity)}
             <span class="lf-title">${escapeHtml(f.title)}</span>
             <span class="lf-meta">${f.foundIter}번째 발견</span></li>`,
@@ -977,19 +1414,61 @@ function renderLedger(run) {
     : '<li class="muted">손볼 항목이 없어요 — 전부 다듬었어요</li>';
   const resHtml = resolved
     .map(
-      (f) => `<li class="lf done">
+      (f) => `<li class="lf done lf-click" data-fid="${f.id}" title="개선본에서 위치 보기">
         <span class="mark">${icon('check')}</span><span class="lf-id">#${f.id}</span>${sev(f.severity)}
         <span class="lf-title">${escapeHtml(f.title)}</span>
         <span class="lf-meta">${f.foundIter}→${f.resolvedIter}번째</span></li>`,
     )
     .join('');
 
+  const chip = (v, label) => `<button class="sev-chip ${ledgerSevFilter === v ? 'on' : ''}" data-sev="${v}">${label}</button>`;
   el.innerHTML = `
     <div class="ledger-bar"><span style="width:${pct}%"></span></div>
+    <div class="sev-filter">${chip('all', '전체')}${chip('high', 'high')}${chip('medium', 'medium')}${chip('low', 'low')}</div>
     <div class="ledger-col-title">손볼 항목 (${open.length})</div>
     <ul class="ledger-list">${openHtml}</ul>
     ${resolved.length ? `<details class="ledger-done"><summary>다듬은 항목 (${resolved.length})</summary><ul class="ledger-list">${resHtml}</ul></details>` : ''}
   `;
+  el.querySelectorAll('.sev-chip').forEach((b) => {
+    b.onclick = () => { ledgerSevFilter = b.dataset.sev; renderLedger(run); };
+  });
+  // #C: 지적 클릭 → 개선본에서 위치 강조
+  el.querySelectorAll('.lf-click').forEach((li) => {
+    li.onclick = () => {
+      const f = (run.findings || []).find((x) => String(x.id) === li.dataset.fid);
+      if (f) focusFinding(run, f);
+    };
+  });
+}
+
+// #C: 지적 제목 속 인용구를 추출(없으면 null)
+function extractQuote(s) {
+  const m = String(s || '').match(/[‘“"'「]([^’”"'」\n]{2,60})[’”"'」]/);
+  return m ? m[1].trim() : null;
+}
+// #C: 본문(escape 후)에서 인용구를 <mark> 로 강조
+function highlightInText(txt, q) {
+  const safe = escapeHtml(txt);
+  if (!q) return safe;
+  const sq = escapeHtml(q).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  try {
+    return safe.replace(new RegExp(sq, 'g'), (m) => `<mark class="find-hit">${m}</mark>`);
+  } catch {
+    return safe;
+  }
+}
+// #C: 지적을 개선본 탭에서 위치로 연결
+function focusFinding(run, f) {
+  highlightQuery = extractQuote(f.title);
+  activeTab = 'artifact';
+  document.querySelectorAll('.tabs .tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === 'artifact'));
+  renderViewer(run).then(() => {
+    const v = $('#viewer');
+    if (!v) return;
+    const hit = v.querySelector('.find-hit');
+    if (hit) hit.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    else v.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  });
 }
 
 function renderDims(best) {
@@ -1066,6 +1545,7 @@ function bindTabs(run) {
   document.querySelectorAll('.tab').forEach((t) => {
     t.onclick = () => {
       activeTab = t.dataset.tab;
+      highlightQuery = null; // 탭 직접 전환 시 지적 강조 해제
       document.querySelectorAll('.tab').forEach((x) => x.classList.remove('active'));
       t.classList.add('active');
       renderViewer(run);
@@ -1092,6 +1572,18 @@ function renderChanges(run) {
     .join('');
 }
 
+// U2: 원본↔개선본 비교 뷰 모드('render' 렌더 2분할 / 'text' 텍스트 차이). 렌더 가능한 타입에서만 토글.
+let diffView = 'render';
+function cmpToggleHtml(active) {
+  const seg = (v, label) => `<button class="seg ${active === v ? 'active' : ''}" data-view="${v}">${label}</button>`;
+  return `<div class="cmp-toggle">${seg('render', '🖼 렌더 비교')}${seg('text', '📝 텍스트 차이')}</div>`;
+}
+function bindCmpToggle(run) {
+  document.querySelectorAll('#viewer .cmp-toggle .seg').forEach((b) => {
+    b.onclick = () => { diffView = b.dataset.view; renderViewer(run); };
+  });
+}
+
 async function renderViewer(run) {
   const el = $('#viewer');
   if (!el) return;
@@ -1109,7 +1601,19 @@ async function renderViewer(run) {
     el.innerHTML = `<div class="md">${renderMarkdown(md)}</div>`;
   } else if (activeTab === 'artifact') {
     const txt = await fetchText(base + '/artifact');
-    el.innerHTML = `<pre>${escapeHtml(txt)}</pre>`;
+    const ext = (run.input.ext || '').toLowerCase();
+    // svg/html 은 소스 대신 '실제 렌더 모습'을 보여준다(스크립트 차단 샌드박스). 소스는 접이식으로 함께.
+    if (ext === 'svg' || ext === 'html' || ext === 'htm') {
+      const dl = `improved.${ext}`;
+      el.innerHTML =
+        `<div class="art-bar"><a class="btnlink" download="${dl}" href="${base}/artifact">${icon('download')} ${dl} 받기</a></div>` +
+        `<iframe class="art-frame" sandbox style="width:100%;height:520px;border:1px solid var(--border,#ddd);border-radius:8px;background:#fff"></iframe>` +
+        `<details class="art-src"><summary class="muted">소스 보기</summary><pre></pre></details>`;
+      el.querySelector('.art-frame').srcdoc = txt;
+      el.querySelector('.art-src pre').textContent = txt;
+    } else {
+      el.innerHTML = `<pre>${highlightInText(txt, highlightQuery)}</pre>`;
+    }
   } else if (activeTab === 'stepdiff') {
     // 이 초안에서 직전 초안(1번째면 원본) 대비 무엇이 바뀌었는지
     const prev = selectedIter - 1;
@@ -1123,186 +1627,107 @@ async function renderViewer(run) {
       fetchText('/api/runs/' + run.id + '/input'),
       fetchText(base + '/artifact'),
     ]);
-    el.innerHTML = renderDiff(orig, improved);
-  }
-}
-
-// ---------- Convergence Trace (signature; self-contained canvas) ----------
-// Brass instrument trace of score-per-pass: kept = filled jade, discarded =
-// hollow, brass best-so-far datum line, live pass emphasized in brass.
-// Draws in left→right once per run selection (respects reduced-motion).
-function drawChart(run) {
-  _chartRun = run;
-  const c = $('#chart');
-  if (!c) return;
-  if ('ResizeObserver' in window) {
-    if (_chartRO) _chartRO.disconnect();
-    _chartRO = new ResizeObserver(debounce(() => { if ($('#chart') && _chartRun) _drawChart(_chartRun, 1); }, 120));
-    _chartRO.observe(c);
-  }
-  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  const enough = (run.scores || []).length >= 2;
-  if (reduce || !enough || run.id === _lastTraceRunId) {
-    _lastTraceRunId = run.id;
-    _drawChart(run, 1);
-    return;
-  }
-  _lastTraceRunId = run.id;
-  if (_chartAnim) cancelAnimationFrame(_chartAnim);
-  const t0 = performance.now();
-  const tick = (t) => {
-    const p = Math.min(1, (t - t0) / 560);
-    const eased = 1 - Math.pow(1 - p, 3);
-    if (!$('#chart')) return;
-    _drawChart(_chartRun, eased);
-    if (p < 1) _chartAnim = requestAnimationFrame(tick);
-  };
-  _chartAnim = requestAnimationFrame(tick);
-}
-
-function _drawChart(run, prog) {
-  if (prog == null) prog = 1;
-  const canvas = $('#chart');
-  if (!canvas) return;
-  const dpr = window.devicePixelRatio || 1;
-  const w = canvas.clientWidth || 600;
-  const h = canvas.clientHeight || 240;
-  canvas.width = w * dpr;
-  canvas.height = h * dpr;
-  const ctx = canvas.getContext('2d');
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, w, h);
-
-  const css = getComputedStyle(document.documentElement);
-  const tok = (n, fb) => (css.getPropertyValue(n).trim() || fb);
-  const SIGNAL = tok('--signal', '#4FD6FF');
-  const LOCK = tok('--lock', '#FFD27A');
-  const OK = tok('--ok', '#5CE6A6');
-  const LINE = tok('--line', '#263352');
-  const FAINT = tok('--faint', '#6E7CA0');
-  const GROUND = tok('--void', '#0A0E1A');
-
-  const data = run.scores || [];
-  const pad = { l: 30, r: 16, t: 16, b: 26 };
-  const cw = w - pad.l - pad.r;
-  const ch = h - pad.t - pad.b;
-
-  ctx.font = '10px ' + tok('--font-mono', 'monospace');
-  ctx.lineWidth = 1;
-  // gridlines + y labels
-  for (let v = 0; v <= 100; v += 25) {
-    const y = pad.t + ch - (v / 100) * ch;
-    ctx.strokeStyle = LINE; ctx.globalAlpha = 0.55;
-    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
-    ctx.globalAlpha = 1; ctx.fillStyle = FAINT; ctx.fillText(String(v), 6, y + 3);
-  }
-  if (!data.length) return;
-
-  const n = data.length;
-  const xFor = (i) => pad.l + (n === 1 ? cw / 2 : (i / (n - 1)) * cw);
-  const yFor = (s) => pad.t + ch - (s / 100) * ch;
-
-  // noise floor — faint dotted baseline at the weakest pass
-  const floor = Math.min(...data.map((d) => d.score));
-  const fy = yFor(floor);
-  ctx.save();
-  ctx.setLineDash([2, 4]); ctx.strokeStyle = FAINT; ctx.globalAlpha = 0.5;
-  ctx.beginPath(); ctx.moveTo(pad.l, fy); ctx.lineTo(w - pad.r, fy); ctx.stroke();
-  ctx.globalAlpha = 0.85; ctx.fillStyle = FAINT;
-  ctx.fillText('noise', w - pad.r - 32, fy - 4);
-  ctx.restore();
-
-  // best-so-far datum — the LOCK line (gold dashed)
-  const best = Math.max(...data.map((d) => d.score));
-  const by = yFor(best);
-  ctx.save();
-  ctx.setLineDash([4, 4]); ctx.strokeStyle = LOCK; ctx.globalAlpha = 0.6;
-  ctx.beginPath(); ctx.moveTo(pad.l, by); ctx.lineTo(w - pad.r, by); ctx.stroke();
-  ctx.restore();
-
-  // points to render this frame (left→right draw-in)
-  const drawn = n === 1 ? 0 : prog * (n - 1);
-  const lastI = Math.floor(drawn + 1e-6);
-  const frac = drawn - lastI;
-  const pts = [];
-  for (let i = 0; i <= Math.min(lastI, n - 1); i++) pts.push([xFor(i), yFor(data[i].score)]);
-  if (lastI < n - 1 && frac > 0) {
-    pts.push([
-      xFor(lastI) + (xFor(lastI + 1) - xFor(lastI)) * frac,
-      yFor(data[lastI].score) + (yFor(data[lastI + 1].score) - yFor(data[lastI].score)) * frac,
-    ]);
-  }
-
-  // area fill (azure signal)
-  if (pts.length) {
-    const grad = ctx.createLinearGradient(0, pad.t, 0, pad.t + ch);
-    grad.addColorStop(0, 'rgba(79,214,255,0.16)');
-    grad.addColorStop(1, 'rgba(79,214,255,0.012)');
-    ctx.beginPath(); ctx.moveTo(pts[0][0], pad.t + ch);
-    pts.forEach((p) => ctx.lineTo(p[0], p[1]));
-    ctx.lineTo(pts[pts.length - 1][0], pad.t + ch); ctx.closePath();
-    ctx.fillStyle = grad; ctx.fill();
-  }
-
-  // signal trace (azure)
-  ctx.strokeStyle = SIGNAL; ctx.lineWidth = 2.25; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
-  ctx.beginPath();
-  pts.forEach((p, i) => (i === 0 ? ctx.moveTo(p[0], p[1]) : ctx.lineTo(p[0], p[1])));
-  ctx.stroke();
-
-  // nodes: kept = filled ok-green, discarded = hollow; live(last) = gold LOCK + halo
-  for (let i = 0; i <= Math.min(lastI, n - 1); i++) {
-    const d = data[i], x = xFor(i), y = yFor(d.score), isLast = i === n - 1;
-    if (isLast) {
-      ctx.fillStyle = LOCK;
-      ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill();
-      ctx.strokeStyle = LOCK; ctx.globalAlpha = 0.35; ctx.lineWidth = 1.5;
-      ctx.beginPath(); ctx.arc(x, y, 9, 0, Math.PI * 2); ctx.stroke(); ctx.globalAlpha = 1;
-    } else if (d.kept) {
-      ctx.fillStyle = OK;
-      ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2); ctx.fill();
+    const ext = (run.input.ext || '').toLowerCase();
+    const renderable = ext === 'svg' || ext === 'html' || ext === 'htm';
+    if (!improved) {
+      el.innerHTML = '<span class="muted">개선본이 아직 없어요.</span>';
+    } else if (renderable && diffView === 'render') {
+      // U2: 원본 vs 개선본을 실제 렌더로 나란히(스크립트 차단 샌드박스).
+      el.innerHTML =
+        cmpToggleHtml('render') +
+        `<div class="render-cmp">
+           <div class="rc-col"><div class="rc-h">원본</div><iframe class="rc-frame" sandbox></iframe></div>
+           <div class="rc-col"><div class="rc-h rc-h-new">개선본</div><iframe class="rc-frame" sandbox></iframe></div>
+         </div>`;
+      const frames = el.querySelectorAll('.rc-frame');
+      frames[0].srcdoc = orig;
+      frames[1].srcdoc = improved;
+      bindCmpToggle(run);
     } else {
-      ctx.fillStyle = GROUND; ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2); ctx.fill();
-      ctx.strokeStyle = FAINT; ctx.lineWidth = 1.5;
-      ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2); ctx.stroke();
+      el.innerHTML = (renderable ? cmpToggleHtml('text') : '') + renderDiff(orig, improved);
+      if (renderable) bindCmpToggle(run);
     }
-    ctx.fillStyle = FAINT; ctx.fillText('#' + d.iteration, x - 7, h - 8);
   }
 }
 
-// ---------- 미니 마크다운 ----------
+
+// ---------- 미니 마크다운 (제목/목록/번호목록/인용/표/코드/링크) ----------
 function renderMarkdown(md) {
   if (!md) return '<span class="muted">없음</span>';
   const lines = md.split('\n');
   let html = '';
-  let inList = false;
+  let listType = null; // 'ul' | 'ol' | null
   let inCode = false;
-  for (let raw of lines) {
+  let inQuote = false;
+  const closeList = () => { if (listType) { html += `</${listType}>`; listType = null; } };
+  const closeQuote = () => { if (inQuote) { html += '</blockquote>'; inQuote = false; } };
+
+  for (let i = 0; i < lines.length; i++) {
+    let raw = lines[i];
+    // 코드펜스
     if (raw.trim().startsWith('```')) {
-      if (!inCode) { html += '<pre class="code">'; inCode = true; }
+      if (!inCode) { closeList(); closeQuote(); html += '<pre class="code">'; inCode = true; }
       else { html += '</pre>'; inCode = false; }
       continue;
     }
     if (inCode) { html += escapeHtml(raw) + '\n'; continue; }
-    let line = inlineMd(escapeHtml(raw));
+
+    // GFM 표: 헤더행 + 구분행(|---|---|) 이 이어지면 표로 렌더.
+    if (/^\s*\|.*\|\s*$/.test(raw) && i + 1 < lines.length && /^\s*\|?[\s:|-]+\|?\s*$/.test(lines[i + 1]) && lines[i + 1].includes('-')) {
+      closeList(); closeQuote();
+      const header = splitRow(raw);
+      i++; // 구분행 소비
+      let t = '<table class="md-table"><thead><tr>' + header.map((c) => `<th>${inlineMd(escapeHtml(c))}</th>`).join('') + '</tr></thead><tbody>';
+      while (i + 1 < lines.length && /^\s*\|.*\|\s*$/.test(lines[i + 1])) {
+        const cells = splitRow(lines[++i]);
+        t += '<tr>' + header.map((_, ci) => `<td>${inlineMd(escapeHtml(cells[ci] ?? ''))}</td>`).join('') + '</tr>';
+      }
+      html += t + '</tbody></table>';
+      continue;
+    }
+
+    // 인용
+    if (/^\s*>\s?/.test(raw)) {
+      closeList();
+      if (!inQuote) { html += '<blockquote>'; inQuote = true; }
+      html += '<p>' + inlineMd(escapeHtml(raw.replace(/^\s*>\s?/, ''))) + '</p>';
+      continue;
+    }
+    closeQuote();
+
     if (/^### /.test(raw)) { closeList(); html += '<h3>' + inlineMd(escapeHtml(raw.slice(4))) + '</h3>'; }
     else if (/^## /.test(raw)) { closeList(); html += '<h2>' + inlineMd(escapeHtml(raw.slice(3))) + '</h2>'; }
     else if (/^# /.test(raw)) { closeList(); html += '<h1>' + inlineMd(escapeHtml(raw.slice(2))) + '</h1>'; }
-    else if (/^\s*[-*] /.test(raw)) {
-      if (!inList) { html += '<ul>'; inList = true; }
-      html += '<li>' + inlineMd(escapeHtml(raw.replace(/^\s*[-*] /, ''))) + '</li>';
-    } else if (raw.trim() === '') { closeList(); }
-    else { closeList(); html += '<p>' + line + '</p>'; }
+    else if (/^\s*\d+[.)] /.test(raw)) {
+      if (listType !== 'ol') { closeList(); html += '<ol>'; listType = 'ol'; }
+      html += '<li>' + inlineMd(escapeHtml(raw.replace(/^\s*\d+[.)] /, ''))) + '</li>';
+    }
+    else if (/^\s*[-*+] /.test(raw)) {
+      if (listType !== 'ul') { closeList(); html += '<ul>'; listType = 'ul'; }
+      html += '<li>' + inlineMd(escapeHtml(raw.replace(/^\s*[-*+] /, ''))) + '</li>';
+    }
+    else if (raw.trim() === '') { closeList(); }
+    else { closeList(); html += '<p>' + inlineMd(escapeHtml(raw)) + '</p>'; }
   }
   closeList();
+  closeQuote();
   if (inCode) html += '</pre>';
   return html;
-  function closeList() { if (inList) { html += '</ul>'; inList = false; } }
+}
+// "| a | b |" → ['a','b'] (양끝 파이프 제거, 이스케이프된 파이프 \| 보존)
+function splitRow(row) {
+  return row.trim().replace(/^\|/, '').replace(/\|$/, '')
+    .split(/(?<!\\)\|/).map((c) => c.trim().replace(/\\\|/g, '|'));
 }
 function inlineMd(s) {
   return s
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/`([^`]+)`/g, '<code>$1</code>');
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    // 링크 [text](url) — escapeHtml 이후라 안전한 스킴만 허용(javascript: 등 차단)
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, text, url) =>
+      /^(https?:|mailto:|\/|#|&amp;)/i.test(url) || /^[\w./-]+$/.test(url)
+        ? `<a href="${url}" target="_blank" rel="noopener noreferrer">${text}</a>`
+        : text);
 }
 
 // ---------- 라인 단위 diff (간단 LCS) ----------
@@ -1313,23 +1738,97 @@ function renderDiff(a, b) {
   if (m * n > 4_000_000) {
     return `<div class="muted">파일이 커서 diff 생략. 개선본/원본 탭을 직접 비교하세요.</div>`;
   }
+  // 라인 단위 LCS → 연산 시퀀스
   const dp = Array.from({ length: m + 1 }, () => new Int32Array(n + 1));
   for (let i = m - 1; i >= 0; i--)
     for (let j = n - 1; j >= 0; j--)
       dp[i][j] = A[i] === B[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
-  let i = 0, j = 0, out = '';
+  const ops = [];
+  let i = 0, j = 0;
   while (i < m && j < n) {
-    if (A[i] === B[j]) { out += diffLine(' ', A[i]); i++; j++; }
-    else if (dp[i + 1][j] >= dp[i][j + 1]) { out += diffLine('-', A[i]); i++; }
-    else { out += diffLine('+', B[j]); j++; }
+    if (A[i] === B[j]) { ops.push(['eq', A[i]]); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { ops.push(['del', A[i]]); i++; }
+    else { ops.push(['add', B[j]]); j++; }
   }
-  while (i < m) out += diffLine('-', A[i++]);
-  while (j < n) out += diffLine('+', B[j++]);
-  return out || '<span class="muted">차이 없음</span>';
+  while (i < m) ops.push(['del', A[i++]]);
+  while (j < n) ops.push(['add', B[j++]]);
+
+  // 삭제런+추가런을 짝지어 "수정된 줄"은 단어 단위로 하이라이트, eq 줄은 접기 대상.
+  let body = '', changed = 0, k = 0;
+  while (k < ops.length) {
+    if (ops[k][0] === 'eq') { body += diffLineHtml('diff-eq', ' ', escapeHtml(ops[k][1])); k++; continue; }
+    const dels = [], adds = [];
+    while (k < ops.length && ops[k][0] === 'del') dels.push(ops[k++][1]);
+    while (k < ops.length && ops[k][0] === 'add') adds.push(ops[k++][1]);
+    body += renderChangeBlock(dels, adds);
+    changed += dels.length + adds.length;
+  }
+  if (!changed) return '<span class="muted">차이 없음</span>';
+  return `<div class="diffwrap">
+    <div class="difftools"><label class="diff-toggle"><input type="checkbox" onchange="toggleDiffOnlyChanged(this)"> 변경된 줄만 보기</label></div>
+    <div class="diffbody">${body}</div>
+  </div>`;
 }
-function diffLine(sign, text) {
-  const cls = sign === '+' ? 'diff-add' : sign === '-' ? 'diff-del' : '';
-  return `<div class="diff-line ${cls}">${escapeHtml(sign + ' ' + text)}</div>`;
+
+function diffLineHtml(cls, sign, innerHtml) {
+  return `<div class="diff-line ${cls}"><span class="dsign">${sign}</span>${innerHtml}</div>`;
+}
+
+// 삭제/추가 묶음을 정렬해 비슷한 줄은 단어 단위로 짝지어 보여준다.
+function renderChangeBlock(dels, adds) {
+  let out = '';
+  const p = Math.min(dels.length, adds.length);
+  let di = 0, ai = 0;
+  for (let k = 0; k < p; k++) {
+    if (linesSimilar(dels[k], adds[k])) {
+      const { delHtml, insHtml } = wordDiff(dels[k], adds[k]);
+      out += diffLineHtml('diff-del', '-', delHtml) + diffLineHtml('diff-add', '+', insHtml);
+    } else {
+      out += diffLineHtml('diff-del', '-', escapeHtml(dels[k])) + diffLineHtml('diff-add', '+', escapeHtml(adds[k]));
+    }
+    di++; ai++;
+  }
+  for (; di < dels.length; di++) out += diffLineHtml('diff-del', '-', escapeHtml(dels[di]));
+  for (; ai < adds.length; ai++) out += diffLineHtml('diff-add', '+', escapeHtml(adds[ai]));
+  return out;
+}
+
+function tokenSetOf(s) {
+  return new Set((s.toLowerCase().match(/[a-z0-9]+|[가-힣]{2,}/g) || []));
+}
+// 두 줄이 "수정된 한 줄"로 볼 만큼 비슷한가(토큰 겹침 비율).
+function linesSimilar(a, b) {
+  const ta = tokenSetOf(a), tb = tokenSetOf(b);
+  if (!ta.size || !tb.size) return false;
+  let inter = 0;
+  for (const t of ta) if (tb.has(t)) inter++;
+  return inter / Math.max(ta.size, tb.size) >= 0.3;
+}
+
+// 한 줄 내부의 단어 단위 diff → 삭제/추가 토큰을 <span> 으로 강조.
+function wordDiff(a, b) {
+  const aw = a.split(/(\s+)/), bw = b.split(/(\s+)/);
+  const m = aw.length, n = bw.length;
+  if (m * n > 40_000) return { delHtml: escapeHtml(a), insHtml: escapeHtml(b) }; // 너무 긴 줄은 통째로
+  const dp = Array.from({ length: m + 1 }, () => new Int32Array(n + 1));
+  for (let i = m - 1; i >= 0; i--)
+    for (let j = n - 1; j >= 0; j--)
+      dp[i][j] = aw[i] === bw[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  let i = 0, j = 0, delHtml = '', insHtml = '';
+  while (i < m && j < n) {
+    if (aw[i] === bw[j]) { delHtml += escapeHtml(aw[i]); insHtml += escapeHtml(bw[j]); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { delHtml += `<span class="w-del">${escapeHtml(aw[i++])}</span>`; }
+    else { insHtml += `<span class="w-ins">${escapeHtml(bw[j++])}</span>`; }
+  }
+  while (i < m) delHtml += `<span class="w-del">${escapeHtml(aw[i++])}</span>`;
+  while (j < n) insHtml += `<span class="w-ins">${escapeHtml(bw[j++])}</span>`;
+  return { delHtml, insHtml };
+}
+
+// "변경된 줄만 보기" 토글(인라인 onchange 에서 호출 — 전역 함수)
+function toggleDiffOnlyChanged(cb) {
+  const wrap = cb.closest('.diffwrap');
+  if (wrap) wrap.classList.toggle('only-changed', cb.checked);
 }
 
 function escapeHtml(s) {
@@ -1346,7 +1845,25 @@ function connectSSE() {
     $('#conn').classList.add('live');
     $('#conn .conn-text').textContent = '실시간';
   });
-  es.addEventListener('change', () => loadRuns());
+  es.addEventListener('change', (e) => {
+    let ids = null; // U1: 바뀐 런 id 만 받아 해당 런을 볼 때만 상세 재렌더
+    try { const d = JSON.parse(e.data || '{}'); if (Array.isArray(d.ids)) ids = d.ids; } catch { /* 구버전 서버 호환 */ }
+    loadRuns(ids);
+  });
+  // P1/U1: 진행 중 생성 토큰 — 지금 보고 있는 런이면 라이브 박스에 흘려보낸다.
+  es.addEventListener('live', (e) => {
+    let m; try { m = JSON.parse(e.data || '{}'); } catch { return; }
+    if (!m || m.runId !== selectedId) return;
+    const box = document.getElementById('live-stream');
+    if (!box) return;
+    if (m.reset) { box.textContent = ''; box.classList.remove('done'); }
+    if (typeof m.text === 'string') {
+      const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+      box.textContent = m.text;
+      if (atBottom) box.scrollTop = box.scrollHeight; // 따라 내려가되, 위로 올려 보면 방해 안 함
+    }
+    if (m.done) box.classList.add('done');
+  });
   es.onerror = () => {
     $('#conn').classList.remove('live');
     $('#conn .conn-text').textContent = '연결 중…';
@@ -1355,5 +1872,9 @@ function connectSSE() {
 
 initForm();
 initShell();
+restoreFormPrefs(); // #3: 마지막 설정 복원(선택 옵션들이 채워진 뒤)
+// #14: 런 목록 검색
+const _searchEl = $('#run-search');
+if (_searchEl) _searchEl.addEventListener('input', () => { runQuery = _searchEl.value.trim().toLowerCase(); renderSidebar(); });
 loadRuns();
 connectSSE();

@@ -277,10 +277,22 @@ function parseEdits(v: unknown): EditOp[] {
       const fidRaw = o.findingId ?? o.finding_id;
       const fid = typeof fidRaw === 'number' ? fidRaw : parseInt(String(fidRaw ?? '').replace(/[^0-9]/g, ''), 10);
       const findingId = Number.isFinite(fid) ? fid : undefined;
-      out.push({ find, replace, reason, findingId });
+      const findingIds = parseIntList(o.findingIds ?? o.finding_ids);
+      out.push({ find, replace, reason, findingId, findingIds });
     }
   }
   return out;
+}
+
+// "findingIds" 를 정수 배열로 파싱(숫자/"#3"/문자열 혼용 허용). 없으면 undefined.
+function parseIntList(v: unknown): number[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const out: number[] = [];
+  for (const x of v) {
+    const n = typeof x === 'number' ? x : parseInt(String(x).replace(/[^0-9]/g, ''), 10);
+    if (Number.isFinite(n)) out.push(n);
+  }
+  return out.length ? out : undefined;
 }
 
 function parseResolved(v: unknown): number[] {

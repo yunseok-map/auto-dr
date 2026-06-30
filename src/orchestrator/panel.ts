@@ -1,5 +1,6 @@
 import { runAgent, runPlain } from './claudeAgent.js';
 import { getDesired } from './controls.js';
+import { dedupeByTitle } from './dedup.js';
 import { buildLensPrompt, buildPrompt, buildVerifyPrompt } from './prompts.js';
 import type { PromptContext } from './prompts.js';
 import type { IterationResult, NewFinding, ProviderId, Severity, TokenUsage } from '../types.js';
@@ -36,7 +37,10 @@ export async function runPanel(o: PanelOptions): Promise<IterationResult> {
     if (o.runId && getDesired(o.runId) === 'stop') throw new Error('사용자 중단으로 패널 리뷰 종료');
   };
 
+  const stages: { name: string; ms: number }[] = []; // U3: 단계별 소요
+
   // ── 1) 병렬 렌즈 리뷰(지적만) ──
+  const lensStart = Date.now();
   const lensResults = await Promise.allSettled(
     o.lenses.map((lens) =>
       runPlain(buildLensPrompt(o.ctx.input, artifact, lens, o.ctx.refsDigest), {
@@ -48,6 +52,7 @@ export async function runPanel(o: PanelOptions): Promise<IterationResult> {
       }),
     ),
   );
+  stages.push({ name: '리뷰', ms: Date.now() - lensStart });
   const candidates: NewFinding[] = [];
   for (const r of lensResults) {
     if (r.status !== 'fulfilled') continue;
@@ -64,6 +69,7 @@ export async function runPanel(o: PanelOptions): Promise<IterationResult> {
   ensureNotStopped();
   let verified = deduped;
   if (o.verify && deduped.length) {
+    const verifyStart = Date.now();
     try {
       const v = await runPlain(buildVerifyPrompt(o.ctx.input, artifact, deduped), {
         cwd: o.cwd,
@@ -92,10 +98,12 @@ export async function runPanel(o: PanelOptions): Promise<IterationResult> {
     } catch {
       /* 검증 실패 시 dedupe 결과를 그대로 사용 */
     }
+    stages.push({ name: '검증', ms: Date.now() - verifyStart });
   }
 
   // ── 4) 에디터: 검증된 지적을 반영해 개선 적용(일반 runAgent 재사용) ──
   ensureNotStopped();
+  const editStart = Date.now();
   const editorPrompt = buildPrompt({ ...o.ctx, injectedFindings: verified });
   const result = await runAgent({
     prompt: editorPrompt,
@@ -106,12 +114,14 @@ export async function runPanel(o: PanelOptions): Promise<IterationResult> {
     runId: o.runId,
     maxCostUsd: o.maxCostUsd,
   });
+  stages.push({ name: '개선', ms: Date.now() - editStart });
 
   // 패널이 찾은 지적을 대장 기록 대상(newFindings)으로 사용(에디터의 new_findings 는 무시).
   result.newFindings = verified;
   result.costUsd = (result.costUsd ?? 0) + extraCost;
   result.tokens = addTok(result.tokens, extraTokens);
   result.durationMs = Date.now() - start;
+  result.stages = stages; // U3: 채점 단계는 러너가 이어붙인다
   return result;
 }
 
@@ -135,19 +145,8 @@ function toFindings(v: unknown): NewFinding[] {
   }
   return out;
 }
-function normTitle(s: string): string {
-  return s.toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, ' ').trim().slice(0, 80);
-}
 function dedupe(items: NewFinding[]): NewFinding[] {
-  const seen = new Set<string>();
-  const out: NewFinding[] = [];
-  for (const f of items) {
-    const k = normTitle(f.title);
-    if (!k || seen.has(k)) continue;
-    seen.add(k);
-    out.push(f);
-  }
-  return out;
+  return dedupeByTitle(items);
 }
 
 // 느슨한 JSON 추출(코드펜스/잡텍스트 허용).

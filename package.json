@@ -11,8 +11,10 @@
     "dev": "tsx src/cli.ts",
     "review": "tsx src/cli.ts review",
     "dashboard": "tsx src/cli.ts dashboard",
+    "dashboard:watch": "tsx watch --clear-screen=false --ignore \"runs/**\" --ignore \"data/**\" src/cli.ts dashboard",
     "list": "tsx src/cli.ts list",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts"
   },
   "dependencies": {
     "chokidar": "^3.6.0",
@@ -24,6 +26,7 @@
     "multer": "^1.4.5-lts.1",
     "pdf-parse": "^1.1.1",
     "pdfkit": "^0.19.1",
+    "playwright": "^1.61.1",
     "pptxgenjs": "^4.0.1"
   },
   "devDependencies": {

@@ -20,6 +20,10 @@ program
   .option('--min-delta <n>', '개선 인정 최소 점수폭', (v) => parseFloat(v))
   .option('--max-iter <n>', '안전 상한 반복 수', (v) => parseInt(v, 10))
   .option('--model <model>', 'claude 모델 (예: opus, sonnet)')
+  .option('--url-mode <mode>', 'URL 리뷰 범위 (content|source|full)', 'full')
+  .option('--url-render <mode>', 'URL JS 렌더링 (off|auto|on)', 'auto')
+  .option('--url-crawl <n>', '같은 도메인 추가 페이지 크롤 수(최대 8)', (v) => parseInt(v, 10))
+  .option('--url-check-links', '링크 유효성(깨진 링크) 검사')
   .option('--no-dashboard', '대시보드 없이 실행')
   .option('--open', '브라우저 자동 열기')
   .action(async (source: string, opts: any) => {
@@ -32,7 +36,7 @@ program
     }
 
     console.log(`입력 분석 중: ${source}`);
-    const input = await resolveInput(source, opts.kind as InputKind | undefined);
+    const input = await resolveInput(source, opts.kind as InputKind | undefined, { urlMode: opts.urlMode, urlRender: opts.urlRender, urlCrawl: opts.urlCrawl, urlCheckLinks: opts.urlCheckLinks });
     console.log(`→ 종류=${input.kind}, 제목=${input.title}, 길이=${input.artifact.length}자\n`);
 
     const run = await startRun(input, {

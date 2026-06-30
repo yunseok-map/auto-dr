@@ -70,6 +70,17 @@
             <select id="focus-select"></select>
           </label>
 
+          <label class="fld" id="persp-wrap">평가 관점 (채점 기준)
+            <select id="persp-select">
+              <option value="auto">자동 추천 — 입력 종류·초점에 맞춤</option>
+              <option value="문서">일반 문서 — 명료성·정확성·간결성</option>
+              <option value="마케팅">마케팅·카피 — 설득력·타깃·SEO</option>
+              <option value="이력서">이력서 — 임팩트·직무적합성</option>
+              <option value="코드">기술·코드 — 정확성·보안·성능</option>
+              <option value="custom">직접 설정 — 아래 맞춤 평가기준</option>
+            </select>
+          </label>
+
           <details class="adv">
             <summary>고급 옵션</summary>
             <div class="adv-body">
@@ -81,8 +92,31 @@
                   <option value="code">코드</option>
                 </select>
               </label>
+              <div id="url-opts" class="url-opts hidden">
+                <div class="url-opts-head">웹사이트(URL) 전용 옵션</div>
+                <label class="fld">URL 리뷰 범위
+                  <select id="urlmode-select">
+                    <option value="full">종합 — 구조·SEO·접근성 + HTML/CSS/JS 코드</option>
+                    <option value="content">콘텐츠만 — 본문 텍스트(카피 리뷰)</option>
+                    <option value="source">소스 위주 — HTML/CSS/JS 코드 중심</option>
+                  </select>
+                </label>
+                <label class="fld">URL JS 렌더링 (SPA 대응)
+                  <select id="urlrender-select">
+                    <option value="auto">자동 — SPA(빈 셸)로 보이면 렌더링</option>
+                    <option value="on">항상 렌더링 (헤드리스 브라우저)</option>
+                    <option value="off">끄기 — 정적 HTML만</option>
+                  </select>
+                </label>
+                <label class="fld">추가 페이지 크롤 (같은 도메인, 최대 8)
+                  <input id="urlcrawl-input" class="text-input" type="number" min="1" max="8" placeholder="1 (단일 페이지)" />
+                </label>
+                <div class="rubric-fld">
+                  <label class="rubric-switch"><input type="checkbox" id="urlchecklinks-on" /> 링크 유효성 검사 (깨진 링크 탐지)</label>
+                </div>
+              </div>
               <label class="fld">최대 반복 횟수 (안전 상한)
-                <input id="maxiter-input" class="text-input" type="number" min="1" placeholder="5" />
+                <input id="maxiter-input" class="text-input" type="number" min="1" placeholder="기본 8" />
               </label>
               <label class="fld">같은 문제 반복 감지 (회)
                 <input id="recur-input" class="text-input" type="number" min="2" placeholder="3" />
@@ -91,48 +125,20 @@
                 <input id="maxcost-input" class="text-input" type="number" min="0" step="0.01" placeholder="제한 없음" />
               </label>
               <label class="fld">런 총비용 상한 ($, 선택)
-                <input id="maxtotalcost-input" class="text-input" type="number" min="0" step="0.01" placeholder="기본 $0.50 — 누적 도달 시 종료 (0=해제)" />
+                <input id="maxtotalcost-input" class="text-input" type="number" min="0" step="0.01" placeholder="기본 $2.00 — 누적 도달 시 종료 (0=해제). panel 모드는 넉넉히" />
               </label>
               <label class="fld">모델당 최대 시도 (자동 라우팅)
                 <input id="maxattempts-input" class="text-input" type="number" min="1" placeholder="2" />
               </label>
-              <label class="fld">호출 방식
-                <select id="provider-select">
-                  <option value="">Claude Code 구독 (기본 · claude -p)</option>
-                  <option value="anthropic">Anthropic API (Claude) — 키 필요</option>
-                  <option value="openai">OpenAI (GPT) — 키 필요</option>
-                  <option value="gemini">Google Gemini — 키 필요</option>
-                </select>
+              <label class="fld">백엔드 / 모델 · API 키
+                <button type="button" id="backend-btn" class="backend-btn">Claude Code 구독 · 자동 모델 ▾</button>
               </label>
-
-              <label class="fld" id="cli-model-wrap">모델
-                <select id="model-select">
-                  <option value="">자동 (추천) — 분량·종류로 선택 + 정체 시 자동 승급</option>
-                  <option value="opus">Opus — 최고 품질(고정)</option>
-                  <option value="sonnet">Sonnet — 균형(고정)</option>
-                  <option value="haiku">Haiku — 빠름·저렴(고정)</option>
-                </select>
-              </label>
-
-              <label class="fld hidden" id="provider-model-wrap">API 모델 id
-                <input id="provider-model" class="text-input" type="text" placeholder="예: claude-haiku-4-5 / gpt-4o-mini / gemini-2.0-flash" />
-              </label>
-
-              <details class="adv" id="keys-adv">
-                <summary>API 키 (직접 호출용 · 이 PC에만 저장)</summary>
-                <div class="adv-body">
-                  <label class="fld">Anthropic 키 <input id="key-anthropic" class="text-input" type="password" placeholder="sk-ant-…" autocomplete="off" /></label>
-                  <label class="fld">OpenAI 키 <input id="key-openai" class="text-input" type="password" placeholder="sk-…" autocomplete="off" /></label>
-                  <label class="fld">Gemini 키 <input id="key-gemini" class="text-input" type="password" placeholder="AIza…" autocomplete="off" /></label>
-                  <button type="button" id="keys-save" class="rubric-add">키 저장</button>
-                  <div id="keys-msg" class="nr-msg"></div>
-                </div>
-              </details>
 
               <div class="rubric-fld">
                 <label class="rubric-switch"><input type="checkbox" id="panel-on" /> 다각도 리뷰 (여러 관점 병렬 + 검증)</label>
                 <label class="rubric-switch panel-sub hidden" id="verify-wrap"><input type="checkbox" id="verify-on" checked /> 지적 진위 검증 (헛지적 거르기)</label>
                 <label class="rubric-switch" style="margin-top: 10px"><input type="checkbox" id="emit-on" /> 변경 내역 만들기 (무엇을 왜 바꿨는지)</label>
+                <label class="rubric-switch" style="margin-top: 10px"><input type="checkbox" id="autoresume-on" /> 사용 한도로 멈추면 리셋 후 자동 이어하기</label>
               </div>
 
               <div class="rubric-fld">
@@ -182,6 +188,7 @@
         </div>
 
         <div class="sidebar-head">내 분석 <span id="run-count" class="badge">0</span></div>
+        <input id="run-search" class="text-input" type="search" placeholder="🔎 제목·상태로 검색…" style="margin: 0 0 8px" />
         <ul id="run-list"></ul>
       </aside>
 
@@ -194,6 +201,63 @@
     </div>
 
     <div id="toasts" class="toasts" role="region" aria-label="알림"></div>
+
+    <!-- 백엔드/모델/키 선택 모달 -->
+    <div id="backend-overlay" class="modal-overlay" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="backend-title">
+        <div class="modal-head">
+          <h3 id="backend-title">백엔드 · 모델 · API 키</h3>
+          <button type="button" id="backend-close" class="modal-x" aria-label="닫기">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="modal-label">호출 방식</div>
+          <div class="provider-cards" id="provider-cards">
+            <label class="pcard"><input type="radio" name="provider" value="" checked /><span class="pc-t">Claude Code 구독</span><span class="pc-d">claude -p · 기본, 키 불필요</span></label>
+            <label class="pcard"><input type="radio" name="provider" value="anthropic" /><span class="pc-t">Anthropic API</span><span class="pc-d">Claude · 키 필요</span></label>
+            <label class="pcard"><input type="radio" name="provider" value="openai" /><span class="pc-t">OpenAI</span><span class="pc-d">GPT · 키 필요</span></label>
+            <label class="pcard"><input type="radio" name="provider" value="gemini" /><span class="pc-t">Google Gemini</span><span class="pc-d">키 필요</span></label>
+            <label class="pcard"><input type="radio" name="provider" value="together" /><span class="pc-t">Together AI</span><span class="pc-d">Llama·Qwen 등 · 키 필요</span></label>
+            <label class="pcard"><input type="radio" name="provider" value="nemotron" /><span class="pc-t">NVIDIA Nemotron</span><span class="pc-d">한도 널널 · 키 필요</span></label>
+          </div>
+          <!-- provider 값을 기존 로직과 호환되게 보관 -->
+          <select id="provider-select" hidden>
+            <option value="">cli</option><option value="anthropic">anthropic</option><option value="openai">openai</option><option value="gemini">gemini</option><option value="together">together</option><option value="nemotron">nemotron</option>
+          </select>
+
+          <div id="cli-model-wrap">
+            <div class="modal-label">모델 (Claude 구독)</div>
+            <select id="model-select" class="text-input">
+              <option value="">자동 (추천) — 분량·종류로 선택 + 정체 시 자동 승급</option>
+              <option value="opus">Opus — 최고 품질(고정)</option>
+              <option value="sonnet">Sonnet — 균형(고정)</option>
+              <option value="haiku">Haiku — 빠름·저렴(고정)</option>
+            </select>
+          </div>
+          <div id="provider-model-wrap" class="hidden">
+            <div class="modal-label">API 모델 id</div>
+            <input id="provider-model" class="text-input" type="text" placeholder="비우면 기본값 · 예: gpt-4o-mini / gemini-2.0-flash / nvidia/nemotron-3-super-120b-a12b" />
+          </div>
+
+          <div class="modal-label">API 키 <span class="muted">(이 PC에만 저장 · 값은 표시되지 않음)</span></div>
+          <div class="keys-grid">
+            <div class="key-row"><span class="key-name">Anthropic</span><input id="key-anthropic" class="text-input" type="password" placeholder="sk-ant-…" autocomplete="off" /><button type="button" class="key-clear" data-clear="anthropic" title="초기화">초기화</button></div>
+            <div class="key-row"><span class="key-name">OpenAI</span><input id="key-openai" class="text-input" type="password" placeholder="sk-…" autocomplete="off" /><button type="button" class="key-clear" data-clear="openai" title="초기화">초기화</button></div>
+            <div class="key-row"><span class="key-name">Gemini</span><input id="key-gemini" class="text-input" type="password" placeholder="AIza…" autocomplete="off" /><button type="button" class="key-clear" data-clear="gemini" title="초기화">초기화</button></div>
+            <div class="key-row"><span class="key-name">Together</span><input id="key-together" class="text-input" type="password" placeholder="…" autocomplete="off" /><button type="button" class="key-clear" data-clear="together" title="초기화">초기화</button></div>
+            <div class="key-row"><span class="key-name">Nemotron</span><input id="key-nemotron" class="text-input" type="password" placeholder="nvapi-…" autocomplete="off" /><button type="button" class="key-clear" data-clear="nemotron" title="초기화">초기화</button></div>
+          </div>
+          <div class="keys-actions">
+            <button type="button" id="keys-save" class="rubric-add">키 저장</button>
+            <button type="button" id="keys-clear-all" class="key-clear">전체 초기화</button>
+          </div>
+          <div id="keys-msg" class="nr-msg"></div>
+        </div>
+        <div class="modal-foot">
+          <button type="button" id="backend-done" class="start-btn" style="margin:0">완료</button>
+        </div>
+      </div>
+    </div>
+
     <script src="app.js"></script>
   </body>
 </html>
